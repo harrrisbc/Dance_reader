@@ -1,0 +1,7 @@
+
+# Backend runtime
+backend/.venv/
+backend/uploads/
+backend/artifacts/
+*.pt
+
