@@ -1,56 +1,70 @@
 # Dance Analyser
 
-本機舞蹈分析工具（**Python 桌面版為主**）：YOLO-Pose + Supervision、能量／速度／空間指標、重複動作類型。
+Local dance analysis: **YOLO-Pose (CUDA when available)** + a **PySide6 desktop** app for review.
 
-介面語言：繁體中文。不需要瀏覽器。
+UI language: **English**. Data stays on this machine; nothing is uploaded to the cloud.
 
-## 啟動（建議）
-
-```powershell
-cd C:\dev\Dance_reader\Dance_reader\backend
-.\.venv\Scripts\activate
-pip install -r requirements.txt
-
-cd ..
-python -m desktop
-```
-
-若 venv 唔喺 PATH：
+## Start (recommended)
 
 ```powershell
+cd C:\dev\Dance_reader\Dance_reader
 .\backend\.venv\Scripts\python.exe -m desktop
 ```
 
-（請喺 repo 根目錄執行。）
+Opens the Qt window (no browser).
 
-## 用法
+### Typical workflow
 
-1. **開啟影片** — 本機檔案  
-2. **播放／拖曳** — 下方滑桿；可點時間軸圖跳轉；**放大／縮小／重設**（或滾輪）  
-3. **最多舞者** — 1–4（預設 2）；丟失後會回收同一舞者編號  
-4. **分析（Supervision）** — 預設 `yolo11s-pose`、每幀；能量／速度／伸展／高低／走位／直進、重複類型  
-5. **儲存專案** — 存成 `.dance.json`（骨架／曲線／類型一齊）；下次 **開啟專案** 唔使再跑分析；舊專案會由 pose 補算空間曲線  
-6. 選舞者、勾選曲線睇圖表；點類型／出現次數跳轉；**上一處／下一處**  
-7. 跳去某段動作 → **搵相似** → 列出所有相似出現  
+1. **Open video** — choose a local file (download YouTube clips first; no YouTube API yet).
+2. Set **Max dancers** and **Model** (S fast default, or M for occlusion / side views), then **Analyze**.
+3. After analysis: stacked metric charts, skeleton overlay, floor map, motif types.
+4. Click a chart to seek; scroll to zoom the time window; **Find similar** for matches near the playhead.
+5. **Save project** (`.dance.json`) / **Open project** to reload without re-analyzing.
 
-## 時間軸曲線
+Status bar shows motif diagnostics after analyze, e.g.  
+`N phrases · M clusters · K passed similarity …`
 
-| 曲線 | 含義 |
-|------|------|
-| 能量 | 整體關節動能 |
-| 速度 | 肢體平均速度 |
-| 伸展 | kinesphere／伸展幅度（相對肩寬） |
-| 高低 | 髖部高度（高姿 → 高值） |
-| 走位 | 短窗內 COM 路徑長度 |
-| 直進 | 淨位移 ÷ 路徑（1 = 直線） |
+### Overlay
 
-預設顯示：能量、速度、伸展。
+**Skeleton** / **Joints only** / **Off**. Lines may cross when limbs overlap in the camera view.
 
-## 可選：舊 Web API
+## Chart units
 
-`backend` 仍有 FastAPI（除錯用）。日常請用 `python -m desktop`。  
-舊 Vite 前端屬 legacy，不必再開。
+| Curve | Unit |
+|-------|------|
+| Energy | Relative to own peak |
+| Speed / Travel | Torso-heights / s |
+| Reach | × torso (guides at closed 1.2 / open 2.5) |
+| Level | Stance ratio (low / mid / high bands) |
+| Directness | Colour ribbon 0–1 (blank when still) |
+| L–R / F–B | Screen coords 0–1 |
 
-## YouTube
+## Legacy web review
 
-尚未接入桌面版；請先下載成檔再開啟。之後可用 yt-dlp。
+Opt-in only (kept for now, not the product UI):
+
+```powershell
+.\backend\.venv\Scripts\python.exe -m desktop --web
+```
+
+Serves `http://127.0.0.1:8000/review`. Prefer Qt for analysis and review.
+
+## Analyze API (optional)
+
+```powershell
+cd backend
+.\.venv\Scripts\activate
+uvicorn app.main:app --port 8000
+```
+
+## Motif thresholds
+
+Matching decides in **raw mask-aware DTW distance** (torso units, mean per visible dim).
+Defaults: `CLUSTER_MAX_DIST=0.28`, `INTRA_MAX_DIST=0.30`, `MATCH_MAX_DIST=0.28`,
+`MOTIF_MIN_OCCURRENCES=3`. The UI shows a display-only 0–100% match score; that score is
+**not** used as a gate. See `docs/IMPLEMENTATION_NOTES_MATCH_W3_THRESHOLDS.md`.
+
+```powershell
+.\backend\.venv\Scripts\python.exe backend\scripts\calibrate_motifs.py path\to\file.dance.json
+.\backend\.venv\Scripts\python.exe backend\scripts\calibrate_motifs.py path\to\hi.dance.json --negative
+```

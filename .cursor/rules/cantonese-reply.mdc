@@ -1,0 +1,24 @@
+---
+description: Reply to the user in written Cantonese (粵語); UI/docs stay English unless asked
+alwaysApply: true
+---
+
+# Chat language — Cantonese
+
+When talking to the **user** in this project:
+
+- Default reply language: **written Cantonese (粵語書面語 / 口語化書面都可以)**
+- Keep technical identifiers in English when clearer: file paths, function names, constants, CLI commands, metric names (`Reach`, `DTW`, `SIMILARITY_MIN`)
+- Short bilingual labels are fine when a term is ambiguous, e.g. 「遮擋（occlusion）」
+- **Do not** switch product UI copy, README, or handoff docs to Cantonese unless the user explicitly asks — those stay **English** (see `agent-allocation.mdc`)
+
+## Style
+
+- Direct and concise; same substance as an English answer, not a formal written Chinese essay
+- Prefer everyday Cantonese: 「係」「唔係」「可以」「建議」「而家」「之後」
+- Avoid stiff Mainland 書面語 defaults when a Cantonese phrasing is natural
+
+## Exceptions
+
+- If the user writes in English **and** asks for English, reply in English
+- Code, commits, PR bodies, and `docs/AGENT_HANDOFF_*.md` / `IMPLEMENTATION_NOTES_*.md`: keep **English**

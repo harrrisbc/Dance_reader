@@ -34,6 +34,9 @@ class MotifOccurrence(BaseModel):
     actorId: str
     start: float
     end: float
+    score: float | None = None  # display-only 0..1 match; optional for auto types
+    tempo_ratio: float | None = None  # hit_dur/query_dur; >1 = slower; Find-similar only
+    is_query: bool = False  # True for the Find-similar seed span
 
 
 class MotifType(BaseModel):
@@ -61,6 +64,8 @@ class AnalysisResult(BaseModel):
     actors: list[Actor] = Field(default_factory=list)
     motifTypes: list[MotifType] = Field(default_factory=list)
     manualMarks: list[ManualMark] = Field(default_factory=list)
+    # Last detect summary, e.g. "18 phrases · 4 clusters · 0 passed similarity 0.60"
+    motifDiag: str | None = None
 
 
 class JobStatus(BaseModel):

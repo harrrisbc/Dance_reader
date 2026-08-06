@@ -52,7 +52,16 @@ Matplotlib CJK: Microsoft JhengHei / Noto Sans TC / Microsoft YaHei.
 
 ## Motif detection
 
-Valley cuts + trajectory embeddings + 搵相似 query-by-example.
+Mirror-invariant matching (left↔right = same gesture):
+
+- `pose_feature_mirrored` / rich bone features in `metrics.py`
+- `sim(A,B) = max( match(A,B), match(A, mirror(B)) )` via cosine prefilter + DTW
+- Mapping: `sim = 1 / (1 + dtw_dist)` (+ light reach/level penalty)
+- Tunables at top of `motifs.py`: `SIMILARITY_MIN=0.86`, `CLUSTER_DISTANCE=0.20`, `INTRA_SIM_MIN=0.86`
+- Prefer fewer tight types; weak clusters dropped
+- 搵相似 lists scores (`相似 0.91`) on occurrences
+
+Re-analyze (or re-run motif detection from poses) to refresh auto types.
 
 ## Project save / load
 

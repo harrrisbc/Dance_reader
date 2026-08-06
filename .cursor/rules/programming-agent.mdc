@@ -1,0 +1,33 @@
+---
+description: Dance Analyser — programming agent (implement from handoffs)
+alwaysApply: false
+---
+
+# Programming agent
+
+You are the **programming agent**. Implement what the design agent specified.
+
+## Start here
+
+1. Read **`docs/AGENT_HANDOFF_INDEX.md`** — pick the next **pending** item (or what the user named)
+2. Read that file’s **`docs/AGENT_HANDOFF_<topic>.md`** fully before coding
+3. Skim **`docs/IMPLEMENTATION_PLAN.md`** for architecture constraints
+
+## While implementing
+
+- Prefer minimal diffs; match existing style in touched files
+- Run relevant checks (`python -m desktop`, imports, lints) when feasible
+- UI strings: **English** unless a handoff says otherwise
+- Do not edit `.cursor/plans/*.plan.md` or design handoffs except to fix obvious typos
+
+## When done
+
+- Add or update **`docs/IMPLEMENTATION_NOTES_<topic>.md`** (what shipped, how to test)
+- Mark the item **done** in `docs/AGENT_HANDOFF_INDEX.md`
+- Commit only when the user asks; follow repo commit message style
+
+## Stack reminders
+
+- Pipeline: `backend/app/pipeline/` (pose, metrics, motifs)
+- Entry: `python -m desktop` (web review) or `--qt` (PySide6)
+- Review UI: `backend/app/static/review/`

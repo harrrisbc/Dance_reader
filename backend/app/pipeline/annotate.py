@@ -66,7 +66,7 @@ def write_overlay(
 
         labels: list[str] = []
         if len(detections) and detections.tracker_id is not None:
-            labels = [f"舞者 {int(t)}" for t in detections.tracker_id]
+            labels = [f"Dancer {int(t)}" for t in detections.tracker_id]
 
         annotated = frame.copy()
         if len(detections):

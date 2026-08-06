@@ -35,6 +35,34 @@ DEFAULT_STRIDE = 1
 DEFAULT_MAX_PEOPLE = 2
 KEYPOINT_EMA_ALPHA = 0.35
 
+# UI whitelist: size key → Ultralytics weight filename
+POSE_MODELS: dict[str, str] = {
+    "S": "yolo11s-pose.pt",  # default — balanced
+    "M": "yolo11m-pose.pt",  # slower, better under occlusion / side view
+}
+
+
+def resolve_pose_model(model: str | None) -> str:
+    """
+    Map UI key (S/M), full filename, or unknown → whitelisted weight path.
+    Empty / invalid → DEFAULT_MODEL (S).
+    """
+    if not model or not str(model).strip():
+        return DEFAULT_MODEL
+    key = str(model).strip()
+    upper = key.upper()
+    if upper in POSE_MODELS:
+        return POSE_MODELS[upper]
+    # Accept exact weight names from the whitelist
+    allowed = set(POSE_MODELS.values())
+    if key in allowed:
+        return key
+    # Bare stem match e.g. yolo11m-pose
+    for filename in allowed:
+        if key == filename or key + ".pt" == filename:
+            return filename
+    return DEFAULT_MODEL
+
 
 @dataclass
 class TrackedPose:
@@ -137,6 +165,7 @@ def resolve_device() -> str:
 
 
 def load_model(model_name: str = DEFAULT_MODEL, device: str | None = None) -> YOLO:
+    model_name = resolve_pose_model(model_name)
     model = YOLO(model_name)
     dev = device or resolve_device()
     try:

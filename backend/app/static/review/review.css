@@ -1,0 +1,223 @@
+:root {
+  --void: #0c0a09;
+  --ink: #f3ebe0;
+  --muted: #a89886;
+  --spotlight: #e8c56e;
+  --curtain: #5c1f24;
+  --glass: rgba(22, 18, 16, 0.72);
+  --serif: "Noto Serif TC", "Songti TC", serif;
+  --sans: "Noto Sans TC", "PingFang TC", "Microsoft JhengHei", sans-serif;
+}
+
+* { box-sizing: border-box; }
+
+html, body {
+  margin: 0;
+  min-height: 100%;
+  font-family: var(--sans);
+  color: var(--ink);
+  background:
+    radial-gradient(ellipse 90% 55% at 50% -10%, rgba(232, 197, 110, 0.14), transparent 55%),
+    linear-gradient(180deg, #120e0c 0%, var(--void) 45%, #0a0807 100%);
+}
+
+.top {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 1rem;
+  align-items: center;
+  justify-content: space-between;
+  padding: 1rem 1.25rem 0.5rem;
+}
+
+.brand h1 {
+  margin: 0;
+  font-family: var(--serif);
+  font-size: clamp(1.6rem, 3vw, 2.2rem);
+  font-weight: 700;
+  color: #fff8dc;
+}
+
+.tag { margin: 0.2rem 0 0; color: var(--muted); font-size: 0.9rem; }
+
+.actions { display: flex; flex-wrap: wrap; gap: 0.5rem; align-items: center; }
+
+.btn {
+  display: inline-flex;
+  align-items: center;
+  border: 1px solid rgba(232, 197, 110, 0.35);
+  background: linear-gradient(180deg, #7a2a32, var(--curtain));
+  color: #fff8dc;
+  border-radius: 999px;
+  padding: 0.45rem 0.95rem;
+  cursor: pointer;
+  font: inherit;
+}
+
+.btn.ghost {
+  background: transparent;
+  color: var(--ink);
+}
+
+.btn:hover { filter: brightness(1.08); }
+
+.badge {
+  font-size: 0.8rem;
+  color: var(--muted);
+  border: 1px solid rgba(232, 197, 110, 0.25);
+  border-radius: 999px;
+  padding: 0.3rem 0.7rem;
+}
+
+.status {
+  margin: 0 1.25rem 0.75rem;
+  color: var(--muted);
+  font-size: 0.9rem;
+}
+
+.layout {
+  display: grid;
+  grid-template-columns: minmax(280px, 1fr) minmax(360px, 1.3fr);
+  gap: 1rem;
+  padding: 0 1.25rem 2rem;
+}
+
+@media (max-width: 960px) {
+  .layout { grid-template-columns: 1fr; }
+}
+
+.stage, .charts {
+  background: var(--glass);
+  border: 1px solid rgba(232, 197, 110, 0.18);
+  border-radius: 8px;
+  padding: 0.85rem;
+}
+
+.video-wrap {
+  position: relative;
+  width: 100%;
+  max-height: 48vh;
+  background: #000;
+  border-radius: 4px;
+  overflow: hidden;
+}
+
+#video {
+  display: block;
+  width: 100%;
+  max-height: 48vh;
+  background: #000;
+}
+
+#skeletonOverlay {
+  position: absolute;
+  left: 0;
+  top: 0;
+  width: 0;
+  height: 0;
+  pointer-events: none;
+  z-index: 2;
+}
+
+.skel-toggle {
+  font-size: 0.85rem;
+  color: var(--muted);
+  display: inline-flex;
+  gap: 0.3rem;
+  align-items: center;
+}
+
+.transport, .actor-row, .series-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  align-items: center;
+  margin-top: 0.65rem;
+}
+
+#clock { color: var(--muted); font-variant-numeric: tabular-nums; }
+
+select {
+  background: #1a1512;
+  color: var(--ink);
+  border: 1px solid rgba(232, 197, 110, 0.3);
+  border-radius: 6px;
+  padding: 0.35rem 0.5rem;
+}
+
+.series-row label {
+  font-size: 0.85rem;
+  color: var(--muted);
+  display: inline-flex;
+  gap: 0.3rem;
+  align-items: center;
+}
+
+.motifs { margin-top: 1rem; }
+.motifs h2, .floor-wrap h2 {
+  margin: 0 0 0.5rem;
+  font-family: var(--serif);
+  font-size: 1.05rem;
+}
+
+#motifList {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: 0.35rem;
+  max-height: 220px;
+  overflow: auto;
+}
+
+#motifList button {
+  width: 100%;
+  text-align: left;
+  border: 1px solid rgba(232, 197, 110, 0.15);
+  background: rgba(22, 18, 16, 0.55);
+  color: var(--ink);
+  border-radius: 6px;
+  padding: 0.55rem 0.7rem;
+  cursor: pointer;
+  display: flex;
+  justify-content: space-between;
+  gap: 0.5rem;
+}
+
+#motifList button:hover, #motifList button.active {
+  border-color: rgba(232, 197, 110, 0.5);
+}
+
+.panel {
+  margin-bottom: 0.55rem;
+  border: 1px solid rgba(232, 197, 110, 0.12);
+  border-radius: 6px;
+  padding: 0.35rem 0.45rem 0.15rem;
+  background: rgba(0, 0, 0, 0.2);
+}
+
+.panel-head {
+  display: flex;
+  justify-content: space-between;
+  font-size: 0.8rem;
+  color: var(--muted);
+  margin-bottom: 0.15rem;
+}
+
+.panel-head strong { color: var(--ink); font-weight: 600; }
+
+/* Do not stretch .uplot — click/seek math requires setSize width == layout width */
+
+#floorMap {
+  width: 100%;
+  max-width: 640px;
+  background: #111;
+  border-radius: 4px;
+  display: block;
+}
+
+.hint {
+  color: var(--muted);
+  font-size: 0.8rem;
+  margin: 0.45rem 0 0;
+}

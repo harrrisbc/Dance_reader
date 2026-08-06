@@ -21,6 +21,7 @@ class DanceProject(BaseModel):
     video_path: str
     analysis: AnalysisResult
     max_people: int | None = None
+    pose_model: str | None = None  # e.g. yolo11s-pose.pt
     saved_at: str = ""
     app_version: str = APP_VERSION
 

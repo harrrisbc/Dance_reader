@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import time
 from pathlib import Path
 
 import cv2
@@ -7,7 +8,7 @@ import matplotlib
 import numpy as np
 from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg
 from matplotlib.figure import Figure
-from PySide6.QtCore import Qt, QThread, QTimer, Signal
+from PySide6.QtCore import Qt, QThread, Signal
 from PySide6.QtGui import QImage, QPixmap
 from PySide6.QtWidgets import (
     QApplication,
@@ -28,13 +29,21 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from app.pipeline.motifs import find_similar_motif, segment_near_time
+from app.pipeline.metrics import frame_aspect
+from app.pipeline.motifs import (
+    LAST_DETECT_STATS,
+    SUBSEQ_MATCH_MAX_DIST,
+    find_similar_motif,
+    format_tempo_label,
+    query_segment_at_time,
+)
 from app.pipeline.pose_track import (
-    COCO_EDGES,
     DEFAULT_MAX_PEOPLE,
     DEFAULT_MODEL,
     DEFAULT_STRIDE,
+    POSE_MODELS,
     TrackBuffer,
+    resolve_pose_model,
 )
 from app.pipeline.run import analyze_video
 from app.project_io import (
@@ -44,40 +53,34 @@ from app.project_io import (
     save_project,
 )
 from app.schemas import AnalysisResult, Actor, MotifOccurrence, MotifType
+from desktop.playback import OverlayPose, VideoDecodeWorker
 
 ROOT = Path(__file__).resolve().parents[1]
 BACKEND = ROOT / "backend"
 ARTIFACTS = BACKEND / "artifacts"
-PREVIEW_MAX_W = 960
 ZOOM_MIN_WINDOW_S = 2.0
-ROW_HEIGHT_IN = 0.72  # ~70px per metric row at default DPI
+PLAYHEAD_MIN_INTERVAL_S = 0.1  # ~10 Hz chart/floor updates while playing
 
 # Chart series: attr, label, color, default_on, kind, ylabel, ylim
 # kind: area | line | level | travel | ribbon | pos
 CHART_SERIES = (
-    ("energy", "能量", "#4aa3ff", True, "area", "相對強度", (0.0, 1.0)),
-    ("speed", "速度", "#f0a040", True, "line", "肩寬／秒", (0.0, 4.0)),
-    ("reach", "伸展", "#78b4a0", True, "reach", "肩寬倍數", (1.0, 3.5)),
-    ("level", "高低", "#c45c4a", False, "level", "站高比例", (0.0, 1.05)),
-    ("travel", "走位", "#e8c56e", False, "area", "肩寬／秒", (0.0, 2.0)),
-    ("directness", "直進", "#a67c52", False, "ribbon", "", (0.0, 1.0)),
-    ("pos_x", "左右", "#8f7cc0", False, "pos", "畫面比例", (0.0, 1.0)),
-    ("pos_y", "前後", "#c07fa8", False, "pos", "畫面比例", (0.0, 1.0)),
+    ("energy", "Energy", "#4aa3ff", True, "area", "rel. peak", (0.0, 1.0)),
+    ("speed", "Speed", "#f0a040", True, "line", "torso/s", (0.0, 7.0)),
+    ("reach", "Reach", "#78b4a0", True, "reach", "× torso", (0.5, 4.0)),
+    ("level", "Level", "#c45c4a", False, "level", "stance ratio", (0.0, 1.05)),
+    ("travel", "Travel", "#e8c56e", False, "area", "torso/s", (0.0, 2.5)),
+    ("directness", "Directness", "#a67c52", False, "ribbon", "", (0.0, 1.0)),
+    ("pos_x", "L–R", "#8f7cc0", False, "pos", "screen", (0.0, 1.0)),
+    ("pos_y", "F–B", "#c07fa8", False, "pos", "screen", (0.0, 1.0)),
 )
 
 
-def _configure_matplotlib_cjk() -> None:
-    matplotlib.rcParams["font.sans-serif"] = [
-        "Microsoft JhengHei",
-        "Noto Sans TC",
-        "Microsoft YaHei",
-        "Arial Unicode MS",
-        "DejaVu Sans",
-    ]
+def _configure_matplotlib() -> None:
+    matplotlib.rcParams["font.sans-serif"] = ["Segoe UI", "DejaVu Sans", "sans-serif"]
     matplotlib.rcParams["axes.unicode_minus"] = False
 
 
-_configure_matplotlib_cjk()
+_configure_matplotlib()
 
 
 class AnalyzeWorker(QThread):
@@ -128,11 +131,10 @@ class MainWindow(QMainWindow):
         self.resize(1100, 720)
 
         self.video_path: Path | None = None
-        self.cap: cv2.VideoCapture | None = None
         self.fps = 30.0
         self.frame_count = 0
         self.playing = False
-        self._play_pos = -1
+        self._display_frame = 0
         self.analysis: AnalysisResult | None = None
         self.track_buffers: dict[str, TrackBuffer] = {}
         self.worker: AnalyzeWorker | None = None
@@ -148,20 +150,40 @@ class MainWindow(QMainWindow):
         self._duration_s = 1.0
         self._dirty = False
         self._project_path: Path | None = None
+        self._last_playhead_wall = 0.0
+        self._video_ready = False
+        self._chart_bg = None
 
-        self.video_label = QLabel("開啟本機影片開始")
+        self.decode = VideoDecodeWorker()
+        self.decode.frame_ready.connect(self.on_decode_frame)
+        self.decode.opened.connect(self.on_decode_opened)
+        self.decode.ended.connect(self.on_decode_ended)
+        self.decode.error.connect(self.on_decode_error)
+        self.decode.start()
+
+        self.video_label = QLabel("Open a local video to begin")
         self.video_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.video_label.setMinimumHeight(360)
         self.video_label.setStyleSheet("background:#111; color:#ccc;")
 
-        self.status = QLabel("準備就緒")
+        self.status = QLabel("Ready")
         self.actor_combo = QComboBox()
         self.actor_combo.currentIndexChanged.connect(self.refresh_chart)
 
         self.max_people_spin = QSpinBox()
         self.max_people_spin.setRange(1, 4)
         self.max_people_spin.setValue(DEFAULT_MAX_PEOPLE)
-        self.max_people_spin.setToolTip("分析時最多追蹤幾位舞者（丟失後會回收同一編號）")
+        self.max_people_spin.setToolTip("Max dancers to track during analysis (IDs may be reused after a drop)")
+
+        self.model_combo = QComboBox()
+        self.model_combo.addItem("S — fast (default)", POSE_MODELS["S"])
+        self.model_combo.addItem("M — more accurate", POSE_MODELS["M"])
+        self.model_combo.setCurrentIndex(0)
+        self.model_combo.setToolTip(
+            "M is slower but often better when fans or side views hide joints. "
+            "Does not replace re-opening projects after the torso-scale fix."
+        )
+        self._last_pose_model = DEFAULT_MODEL
 
         self.slider = QSlider(Qt.Orientation.Horizontal)
         self.slider.sliderMoved.connect(self.on_seek)
@@ -174,48 +196,71 @@ class MainWindow(QMainWindow):
         self.occ_list = QListWidget()
         self.occ_list.itemClicked.connect(self.on_occ_clicked)
 
-        self.prev_occ_btn = QPushButton("上一處")
+        self.prev_occ_btn = QPushButton("Prev")
         self.prev_occ_btn.clicked.connect(lambda: self.step_occurrence(-1))
-        self.next_occ_btn = QPushButton("下一處")
+        self.next_occ_btn = QPushButton("Next")
         self.next_occ_btn.clicked.connect(lambda: self.step_occurrence(1))
 
-        self.fig = Figure(figsize=(5, 3.5), tight_layout=True)
+        self.fig = Figure(figsize=(5, 3.5))
         self.canvas = FigureCanvasQTAgg(self.fig)
         self.canvas.setMinimumHeight(220)
         self.canvas.mpl_connect("button_press_event", self.on_chart_click)
         self.canvas.mpl_connect("scroll_event", self.on_chart_scroll)
+        # Keep figure inches in sync with widget pixels (HiDPI click accuracy)
+        _orig_resize = self.canvas.resizeEvent
 
-        self.floor_fig = Figure(figsize=(5, 2.4), tight_layout=True)
+        def _canvas_resize(event) -> None:  # noqa: ANN001
+            _orig_resize(event)
+            self._sync_chart_figsize()
+            if self._chart_axes:
+                self.fig.subplots_adjust(
+                    left=0.12, right=0.98, top=0.92, bottom=0.12, hspace=0.45
+                )
+                self._chart_bg = None
+                self.canvas.draw_idle()
+
+        self.canvas.resizeEvent = _canvas_resize  # type: ignore[method-assign]
+
+        self.floor_fig = Figure(figsize=(5, 2.4))
         self.floor_canvas = FigureCanvasQTAgg(self.floor_fig)
         self.floor_canvas.setMinimumHeight(160)
 
-        self.floor_toggle = QCheckBox("走位圖（畫面座標）")
+        self.skel_style = QComboBox()
+        self.skel_style.addItem("Skeleton", "skeleton")
+        self.skel_style.addItem("Joints only", "joints")
+        self.skel_style.addItem("Off", "off")
+        self.skel_style.setToolTip(
+            "Lines may cross when limbs overlap in the camera view."
+        )
+        self.skel_style.currentIndexChanged.connect(self.sync_overlay)
+
+        self.floor_toggle = QCheckBox("Floor map (screen coords)")
         self.floor_toggle.setChecked(True)
         self.floor_toggle.setToolTip(
-            "螢幕座標，非真實舞台座標。固定鏡頭的排練片最準；鏡頭平移／縮放會扭曲。"
+            "Screen coordinates, not true stage space. Best with a fixed camera; pan/zoom distorts."
         )
         self.floor_toggle.stateChanged.connect(self._on_floor_toggle)
 
-        open_btn = QPushButton("開啟影片")
+        open_btn = QPushButton("Open video")
         open_btn.clicked.connect(self.open_video)
-        open_project_btn = QPushButton("開啟專案")
+        open_project_btn = QPushButton("Open project")
         open_project_btn.clicked.connect(self.open_project)
-        save_project_btn = QPushButton("儲存專案")
+        save_project_btn = QPushButton("Save project")
         save_project_btn.clicked.connect(self.save_project_dialog)
-        self.play_btn = QPushButton("播放")
+        self.play_btn = QPushButton("Play")
         self.play_btn.clicked.connect(self.toggle_play)
-        analyze_btn = QPushButton("分析（Supervision）")
+        analyze_btn = QPushButton("Analyze")
         analyze_btn.clicked.connect(self.start_analyze)
-        self.find_similar_btn = QPushButton("搵相似")
+        self.find_similar_btn = QPushButton("Find similar")
         self.find_similar_btn.clicked.connect(self.find_similar)
-        rename_btn = QPushButton("重新命名類型")
+        rename_btn = QPushButton("Rename type")
         rename_btn.clicked.connect(self.rename_selected_motif)
 
-        zoom_in_btn = QPushButton("放大")
+        zoom_in_btn = QPushButton("Zoom in")
         zoom_in_btn.clicked.connect(lambda: self.zoom_timeline(0.7))
-        zoom_out_btn = QPushButton("縮小")
+        zoom_out_btn = QPushButton("Zoom out")
         zoom_out_btn.clicked.connect(lambda: self.zoom_timeline(1.4))
-        zoom_reset_btn = QPushButton("重設")
+        zoom_reset_btn = QPushButton("Reset")
         zoom_reset_btn.clicked.connect(self.reset_timeline_zoom)
 
         top = QHBoxLayout()
@@ -225,10 +270,14 @@ class MainWindow(QMainWindow):
         top.addWidget(self.play_btn)
         top.addWidget(analyze_btn)
         top.addWidget(self.find_similar_btn)
-        top.addWidget(QLabel("舞者"))
+        top.addWidget(QLabel("Dancer"))
         top.addWidget(self.actor_combo)
-        top.addWidget(QLabel("最多舞者"))
+        top.addWidget(QLabel("Overlay"))
+        top.addWidget(self.skel_style)
+        top.addWidget(QLabel("Max dancers"))
         top.addWidget(self.max_people_spin)
+        top.addWidget(QLabel("Model"))
+        top.addWidget(self.model_combo)
         top.addWidget(rename_btn)
         top.addStretch(1)
 
@@ -237,14 +286,14 @@ class MainWindow(QMainWindow):
         occ_nav.addWidget(self.next_occ_btn)
 
         zoom_row = QHBoxLayout()
-        zoom_row.addWidget(QLabel("時間軸"))
+        zoom_row.addWidget(QLabel("Timeline"))
         zoom_row.addWidget(zoom_in_btn)
         zoom_row.addWidget(zoom_out_btn)
         zoom_row.addWidget(zoom_reset_btn)
         zoom_row.addStretch(1)
 
         series_row = QHBoxLayout()
-        series_row.addWidget(QLabel("曲線"))
+        series_row.addWidget(QLabel("Curves"))
         self.series_checks: dict[str, QCheckBox] = {}
         for attr, label, _color, default_on, *_rest in CHART_SERIES:
             cb = QCheckBox(label)
@@ -255,14 +304,14 @@ class MainWindow(QMainWindow):
         series_row.addStretch(1)
 
         right = QVBoxLayout()
-        right.addWidget(QLabel("重複動作類型（雙擊改名）"))
+        right.addWidget(QLabel("Motif types (double-click to rename)"))
         right.addWidget(self.motif_list, stretch=1)
-        right.addWidget(QLabel("出現次數（點選跳轉）"))
+        right.addWidget(QLabel("Occurrences (click to seek)"))
         right.addWidget(self.occ_list, stretch=1)
         right.addLayout(occ_nav)
         right.addLayout(zoom_row)
         right.addLayout(series_row)
-        right.addWidget(QLabel("點圖跳轉 · 滾輪縮放"))
+        right.addWidget(QLabel("Click chart to seek · scroll to zoom"))
         right.addWidget(self.canvas, stretch=3)
         right.addWidget(self.floor_toggle)
         right.addWidget(self.floor_canvas, stretch=2)
@@ -283,14 +332,12 @@ class MainWindow(QMainWindow):
         w.setLayout(root)
         self.setCentralWidget(w)
 
-        self.timer = QTimer(self)
-        self.timer.setInterval(33)
-        self.timer.timeout.connect(self.on_tick)
+        self.actor_combo.currentIndexChanged.connect(self.sync_overlay)
 
     def open_video(self) -> None:
         path, _ = QFileDialog.getOpenFileName(
             self,
-            "選擇影片",
+            "Select video",
             "",
             "Video (*.mp4 *.mov *.avi *.mkv *.webm);;All (*.*)",
         )
@@ -299,8 +346,6 @@ class MainWindow(QMainWindow):
         self.load_video(Path(path))
 
     def load_video(self, path: Path, *, clear_analysis: bool = True) -> None:
-        if self.cap is not None:
-            self.cap.release()
         self.video_path = path
         if clear_analysis:
             self.analysis = None
@@ -320,114 +365,167 @@ class MainWindow(QMainWindow):
             self._floor_playhead = None
             self.canvas.draw_idle()
             self.floor_canvas.draw_idle()
-        self._play_pos = -1
+            self.sync_overlay()
+        self._display_frame = 0
+        self._video_ready = False
+        self.playing = False
+        self.play_btn.setText("Play")
+        if clear_analysis:
+            self.status.setText(str(path.name))
+        self.decode.request("open", path)
 
-        self.cap = cv2.VideoCapture(str(path))
-        if not self.cap.isOpened():
-            QMessageBox.warning(self, "錯誤", f"無法開啟：{path}")
-            self.cap = None
-            return
-        self.fps = float(self.cap.get(cv2.CAP_PROP_FPS) or 30.0)
-        self.frame_count = int(self.cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
+    def on_decode_opened(self, fps: float, frame_count: int) -> None:
+        self.fps = float(fps) or 30.0
+        self.frame_count = int(frame_count)
         self._duration_s = self.frame_count / max(self.fps, 1e-6)
         self.view_start = 0.0
         self.view_end = max(self._duration_s, 1.0)
         self.slider.setMinimum(0)
         self.slider.setMaximum(max(0, self.frame_count - 1))
         self.slider.setValue(0)
+        self._video_ready = True
+        self.sync_overlay()
+
+    def on_decode_error(self, msg: str) -> None:
+        self._video_ready = False
+        QMessageBox.warning(self, "Error", msg)
+
+    def on_decode_ended(self) -> None:
         self.playing = False
-        self.play_btn.setText("播放")
-        self.timer.setInterval(max(1, int(round(1000.0 / max(self.fps, 1.0)))))
-        if clear_analysis:
-            self.status.setText(str(path.name))
-        self.show_frame(0, force_seek=True)
+        self.play_btn.setText("Play")
+        self.update_playhead(self.current_time(), force=True)
 
-    def current_time(self) -> float:
-        if not self.cap:
-            return 0.0
-        idx = int(self.slider.value())
-        return idx / max(self.fps, 1e-6)
-
-    def seek_time(self, t: float) -> None:
-        if self.cap is None or self.frame_count <= 0:
+    def on_decode_frame(
+        self, qimg: object, frame_idx: int, t: float, playing: bool
+    ) -> None:
+        if not isinstance(qimg, QImage):
             return
-        frame = int(round(t * self.fps))
-        frame = max(0, min(frame, self.frame_count - 1))
-        self.show_frame(frame, force_seek=True)
-
-    def show_frame(self, frame_idx: int, *, force_seek: bool = False) -> None:
-        if self.cap is None:
-            return
-        frame_idx = max(0, min(frame_idx, max(0, self.frame_count - 1)))
-
-        # Sequential read while playing — avoid random seek every frame
-        need_seek = force_seek or self._play_pos < 0 or frame_idx != self._play_pos + 1
-        if need_seek:
-            self.cap.set(cv2.CAP_PROP_POS_FRAMES, frame_idx)
-        ok, frame = self.cap.read()
-        if not ok:
-            return
-        self._play_pos = frame_idx
-
-        t = frame_idx / max(self.fps, 1e-6)
-        frame = self.draw_poses(frame, t)
-
-        # Cap preview size before Qt scale
-        h0, w0 = frame.shape[:2]
-        if w0 > PREVIEW_MAX_W:
-            scale = PREVIEW_MAX_W / w0
-            frame = cv2.resize(
-                frame,
-                (PREVIEW_MAX_W, max(1, int(h0 * scale))),
-                interpolation=cv2.INTER_AREA,
-            )
-
-        rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-        h, w, ch = rgb.shape
-        img = QImage(rgb.data, w, h, ch * w, QImage.Format.Format_RGB888).copy()
+        self._display_frame = int(frame_idx)
+        if not playing and self.playing:
+            self.playing = False
+            self.play_btn.setText("Play")
         xform = (
             Qt.TransformationMode.FastTransformation
             if self.playing
             else Qt.TransformationMode.SmoothTransformation
         )
-        pix = QPixmap.fromImage(img).scaled(
+        pix = QPixmap.fromImage(qimg).scaled(
             self.video_label.size(),
             Qt.AspectRatioMode.KeepAspectRatio,
             xform,
         )
         self.video_label.setPixmap(pix)
         self.slider.blockSignals(True)
-        self.slider.setValue(frame_idx)
+        self.slider.setValue(int(frame_idx))
         self.slider.blockSignals(False)
-        self.update_playhead(t)
+        self.update_playhead(float(t), force=not self.playing)
 
-    def draw_poses(self, frame: np.ndarray, t: float) -> np.ndarray:
-        if not self.analysis or not self.analysis.actors:
-            return frame
-        out = frame.copy()
-        h, w = out.shape[:2]
+    def current_time(self) -> float:
+        if not self._video_ready:
+            return 0.0
+        return self._display_frame / max(self.fps, 1e-6)
+
+    def seek_time(self, t: float) -> None:
+        if not self._video_ready or self.frame_count <= 0:
+            return
+        frame = int(round(t * self.fps))
+        frame = max(0, min(frame, self.frame_count - 1))
+        self.playing = False
+        self.play_btn.setText("Play")
+        self.decode.request("seek", frame)
+
+    def sync_overlay(self) -> None:
+        """Push selected-actor poses to the decode worker (selected only)."""
+        poses: list[OverlayPose] = []
         actor = self.selected_actor()
-        actors = [actor] if actor else self.analysis.actors
-        colors = [(80, 180, 255), (80, 220, 120), (220, 160, 80), (200, 100, 220)]
-        for ai, act in enumerate(actors):
-            if not act or not act.poses:
-                continue
-            pose = min(act.poses, key=lambda p: abs(p.time - t))
-            if abs(pose.time - t) > 0.35:
-                continue
-            color = colors[ai % len(colors)]
-            pts = []
-            for kp in pose.keypoints:
-                if len(kp) < 3 or kp[2] < 0.3:
-                    pts.append(None)
-                    continue
-                x, y = int(kp[0] * w), int(kp[1] * h)
-                pts.append((x, y))
-                cv2.circle(out, (x, y), 3, color, -1)
-            for a, b in COCO_EDGES:
-                if a < len(pts) and b < len(pts) and pts[a] and pts[b]:
-                    cv2.line(out, pts[a], pts[b], color, 2)
-        return out
+        if actor and actor.poses:
+            poses = [
+                OverlayPose(time=float(p.time), keypoints=p.keypoints) for p in actor.poses
+            ]
+        style = self.skel_style.currentData()
+        if style is None:
+            style = "skeleton"
+        self.decode.request("set_overlay", (poses, str(style)))
+
+    def _sync_chart_figsize(self) -> None:
+        w = max(1, int(self.canvas.width()))
+        h = max(1, int(self.canvas.height()))
+        dpi = float(self.fig.get_dpi() or 100.0)
+        self.fig.set_size_inches(w / dpi, h / dpi, forward=False)
+
+    def toggle_play(self) -> None:
+        if not self._video_ready:
+            return
+        if self.playing:
+            self.playing = False
+            self.play_btn.setText("Play")
+            self.decode.request("pause", self._display_frame)
+        else:
+            self.playing = True
+            self.play_btn.setText("Pause")
+            self._last_playhead_wall = 0.0
+            self.decode.request("play", self._display_frame)
+
+    def on_seek(self, value: int) -> None:
+        self.playing = False
+        self.play_btn.setText("Play")
+        self.decode.request("seek", int(value))
+
+    def on_seek_release(self) -> None:
+        self.decode.request("seek", int(self.slider.value()))
+
+    def selected_pose_model(self) -> str:
+        data = self.model_combo.currentData()
+        return resolve_pose_model(str(data) if data else DEFAULT_MODEL)
+
+    def set_pose_model_combo(self, model: str | None) -> None:
+        resolved = resolve_pose_model(model)
+        for i in range(self.model_combo.count()):
+            if self.model_combo.itemData(i) == resolved:
+                self.model_combo.setCurrentIndex(i)
+                return
+        self.model_combo.setCurrentIndex(0)
+
+    def start_analyze(self) -> None:
+        if self.video_path is None:
+            QMessageBox.information(self, "Note", "Open a video first")
+            return
+        if self.worker and self.worker.isRunning():
+            return
+        n = int(self.max_people_spin.value())
+        model_name = self.selected_pose_model()
+        self._last_pose_model = model_name
+        self.status.setText(f"Analyzing… (max {n} dancers, {model_name})")
+        self.worker = AnalyzeWorker(
+            self.video_path, max_people=n, model_name=model_name
+        )
+        self.worker.progress.connect(self.on_progress)
+        self.worker.finished_ok.connect(self.on_analyze_done)
+        self.worker.finished_err.connect(self.on_analyze_err)
+        self.worker.start()
+
+    def on_progress(self, p: float, msg: str) -> None:
+        self.status.setText(f"{msg}  {int(p * 100)}%")
+
+    def on_analyze_done(self, result: object, keyed: object) -> None:
+        assert isinstance(result, AnalysisResult)
+        self.analysis = result
+        self.track_buffers = keyed if isinstance(keyed, dict) else {}
+        self._dirty = True
+        self._project_path = None
+        self.apply_analysis_to_ui(seek_first_motif=True)
+        n_types = len(result.motifTypes)
+        diag = result.motifDiag or LAST_DETECT_STATS.summary()
+        model_bit = Path(self._last_pose_model).stem
+        if n_types == 0:
+            self.status.setText(f"Done: no motif types ({model_bit}) — {diag}")
+        else:
+            self.status.setText(
+                f"Done: {len(result.actors)} dancers, {n_types} motif types "
+                f"({model_bit}) — unsaved — {diag}"
+            )
+        self.sync_overlay()
+        self.decode.request("seek", int(self.slider.value()))
 
     def selected_actor(self) -> Actor | None:
         if not self.analysis or self.actor_combo.count() == 0:
@@ -444,68 +542,6 @@ class MainWindow(QMainWindow):
             (m for m in self.analysis.motifTypes if m.id == self.selected_type_id),
             None,
         )
-
-    def toggle_play(self) -> None:
-        if self.cap is None:
-            return
-        self.playing = not self.playing
-        self.play_btn.setText("暫停" if self.playing else "播放")
-        if self.playing:
-            self.timer.setInterval(max(1, int(round(1000.0 / max(self.fps, 1.0)))))
-            self.timer.start()
-        else:
-            self.timer.stop()
-            # Refresh with smooth scale when paused
-            self.show_frame(self.slider.value(), force_seek=True)
-
-    def on_tick(self) -> None:
-        if self.cap is None or not self.playing:
-            return
-        idx = self._play_pos + 1 if self._play_pos >= 0 else int(self.slider.value()) + 1
-        if idx >= self.frame_count - 1:
-            self.playing = False
-            self.play_btn.setText("播放")
-            self.timer.stop()
-            return
-        self.show_frame(idx, force_seek=False)
-
-    def on_seek(self, value: int) -> None:
-        self.playing = False
-        self.play_btn.setText("播放")
-        self.timer.stop()
-        self.show_frame(value, force_seek=True)
-
-    def on_seek_release(self) -> None:
-        self.show_frame(self.slider.value(), force_seek=True)
-
-    def start_analyze(self) -> None:
-        if self.video_path is None:
-            QMessageBox.information(self, "提示", "請先開啟影片")
-            return
-        if self.worker and self.worker.isRunning():
-            return
-        n = int(self.max_people_spin.value())
-        self.status.setText(f"分析中…（最多 {n} 位舞者）")
-        self.worker = AnalyzeWorker(self.video_path, max_people=n)
-        self.worker.progress.connect(self.on_progress)
-        self.worker.finished_ok.connect(self.on_analyze_done)
-        self.worker.finished_err.connect(self.on_analyze_err)
-        self.worker.start()
-
-    def on_progress(self, p: float, msg: str) -> None:
-        self.status.setText(f"{msg}  {int(p * 100)}%")
-
-    def on_analyze_done(self, result: object, keyed: object) -> None:
-        assert isinstance(result, AnalysisResult)
-        self.analysis = result
-        self.track_buffers = keyed if isinstance(keyed, dict) else {}
-        self._dirty = True
-        self._project_path = None
-        self.apply_analysis_to_ui(seek_first_motif=True)
-        self.status.setText(
-            f"完成：{len(result.actors)} 位舞者，{len(result.motifTypes)} 種重複類型（未儲存）"
-        )
-        self.show_frame(self.slider.value(), force_seek=True)
 
     def apply_analysis_to_ui(self, *, seek_first_motif: bool = False) -> None:
         if not self.analysis:
@@ -524,7 +560,7 @@ class MainWindow(QMainWindow):
         self.motif_list.clear()
         self.occ_list.clear()
         for m in result.motifTypes:
-            item = QListWidgetItem(f"{m.name}  ·  {len(m.occurrences)} 次")
+            item = QListWidgetItem(f"{m.name}  ·  {len(m.occurrences)}×")
             item.setData(Qt.ItemDataRole.UserRole, m.id)
             self.motif_list.addItem(item)
         if result.motifTypes:
@@ -535,15 +571,16 @@ class MainWindow(QMainWindow):
             )
         else:
             self.refresh_chart()
+        self.sync_overlay()
 
     def save_project_dialog(self) -> None:
         if not self.analysis or self.video_path is None:
-            QMessageBox.information(self, "提示", "請先開啟影片並完成分析，再儲存專案。")
+            QMessageBox.information(self, "Note", "Open a video and finish analysis before saving a project.")
             return
         suggested = self._project_path or self.video_path.with_suffix(".dance.json")
         path, _ = QFileDialog.getSaveFileName(
             self,
-            "儲存專案",
+            "Save project",
             str(suggested),
             "Dance project (*.dance.json);;JSON (*.json)",
         )
@@ -557,18 +594,19 @@ class MainWindow(QMainWindow):
                 video_path=str(self.video_path.resolve()),
                 analysis=self.analysis,
                 max_people=int(self.max_people_spin.value()),
+                pose_model=self.selected_pose_model(),
             )
             save_project(out, project)
             self._project_path = out
             self._dirty = False
-            self.status.setText(f"已儲存：{out.name}")
+            self.status.setText(f"Saved: {out.name}")
         except Exception as exc:
-            QMessageBox.critical(self, "儲存失敗", str(exc))
+            QMessageBox.critical(self, "Save failed", str(exc))
 
     def open_project(self) -> None:
         path, _ = QFileDialog.getOpenFileName(
             self,
-            "開啟專案",
+            "Open project",
             "",
             "Dance project (*.dance.json);;JSON (*.json);;All (*.*)",
         )
@@ -577,19 +615,19 @@ class MainWindow(QMainWindow):
         try:
             project = load_project(Path(path))
         except Exception as exc:
-            QMessageBox.critical(self, "開啟失敗", str(exc))
+            QMessageBox.critical(self, "Open failed", str(exc))
             return
 
         video = Path(project.video_path)
         if not video.is_file():
             QMessageBox.warning(
                 self,
-                "搵唔到影片",
-                f"專案入面嘅影片路徑唔存在：\n{project.video_path}\n\n請重新揀選影片檔。",
+                "Video not found",
+                f"Project video path does not exist:\n{project.video_path}\n\nPlease select the video file.",
             )
             picked, _ = QFileDialog.getOpenFileName(
                 self,
-                "揀選專案對應影片",
+                "Select project video",
                 "",
                 "Video (*.mp4 *.mov *.avi *.mkv *.webm);;All (*.*)",
             )
@@ -599,6 +637,9 @@ class MainWindow(QMainWindow):
 
         if project.max_people:
             self.max_people_spin.setValue(max(1, min(4, int(project.max_people))))
+        self.set_pose_model_combo(project.pose_model)
+        if project.pose_model:
+            self._last_pose_model = resolve_pose_model(project.pose_model)
 
         self.analysis = project.analysis
         self.track_buffers = buffers_from_analysis(project.analysis)
@@ -606,36 +647,50 @@ class MainWindow(QMainWindow):
         self._dirty = False
         self.load_video(video, clear_analysis=False)
         self.apply_analysis_to_ui(seek_first_motif=False)
-        self.show_frame(0, force_seek=True)
+        self.sync_overlay()
         self.status.setText(
-            f"已載入專案：{Path(path).name}（{len(project.analysis.actors)} 舞者，"
-            f"{len(project.analysis.motifTypes)} 類型）— 唔使再分析"
+            f"Loaded project: {Path(path).name} ({len(project.analysis.actors)} dancers, "
+            f"{len(project.analysis.motifTypes)} types) — no re-analysis needed"
         )
 
     def find_similar(self) -> None:
         if not self.analysis or not self.track_buffers:
-            QMessageBox.information(self, "提示", "請先完成分析")
+            QMessageBox.information(self, "Note", "Finish analysis first")
             return
         actor = self.selected_actor()
         if actor is None:
-            QMessageBox.information(self, "提示", "請選擇舞者")
+            QMessageBox.information(self, "Note", "Select a dancer")
             return
 
         query_time = self.current_time()
+        q_start: float | None = None
+        q_end: float | None = None
         mtype = self.selected_motif_type()
         if mtype and self.selected_occ_id:
             occ = next((o for o in mtype.occurrences if o.id == self.selected_occ_id), None)
             if occ:
                 query_time = (occ.start + occ.end) / 2
+                q_start, q_end = float(occ.start), float(occ.end)
                 actor_id = occ.actorId
             else:
                 actor_id = actor.id
         else:
             actor_id = actor.id
 
-        query = segment_near_time(self.track_buffers, actor_id, query_time)
+        aspect = frame_aspect(
+            int(self.analysis.frame_width or 0),
+            int(self.analysis.frame_height or 0),
+        )
+        query = query_segment_at_time(
+            self.track_buffers,
+            actor_id,
+            query_time,
+            start=q_start,
+            end=q_end,
+            aspect=aspect,
+        )
         if query is None:
-            QMessageBox.warning(self, "搵相似", "而家呢一段動態唔夠，請跳去有動作嘅位置再試。")
+            QMessageBox.warning(self, "Find similar", "Not enough motion here — seek to a clearer move and try again.")
             return
 
         self._sim_counter += 1
@@ -643,12 +698,18 @@ class MainWindow(QMainWindow):
         found = find_similar_motif(
             self.track_buffers,
             query,
-            name=f"相似 {n}",
+            name=f"Similar {n}",
             type_id=f"type_sim_{n}",
             color="#78b4a0" if n % 2 else "#a67c52",
+            aspect=aspect,
         )
         if found is None or not found.occurrences:
-            QMessageBox.information(self, "搵相似", "搵唔到相似動作。")
+            QMessageBox.information(
+                self,
+                "Find similar",
+                f"No similar moves found (need DTW distance ≤ {SUBSEQ_MATCH_MAX_DIST:.2f} "
+                f"besides the query).",
+            )
             return
 
         remaining = [m for m in self.analysis.motifTypes if m.id != found.id]
@@ -657,7 +718,7 @@ class MainWindow(QMainWindow):
 
         self.motif_list.clear()
         for m in self.analysis.motifTypes:
-            item = QListWidgetItem(f"{m.name}  ·  {len(m.occurrences)} 次")
+            item = QListWidgetItem(f"{m.name}  ·  {len(m.occurrences)}×")
             item.setData(Qt.ItemDataRole.UserRole, m.id)
             self.motif_list.addItem(item)
         for row in range(self.motif_list.count()):
@@ -666,11 +727,15 @@ class MainWindow(QMainWindow):
                 break
         self.select_motif_type(found.id, seek_first=True)
         self._dirty = True
-        self.status.setText(f"{found.name}：找到 {len(found.occurrences)} 處（未儲存）")
+        best = found.occurrences[0].score
+        best_txt = f", best {best * 100:.0f}%" if best is not None else ""
+        self.status.setText(
+            f"{found.name}: {len(found.occurrences)} hits{best_txt} (unsaved)"
+        )
 
     def on_analyze_err(self, err: str) -> None:
-        self.status.setText("分析失敗")
-        QMessageBox.critical(self, "分析失敗", err)
+        self.status.setText("Analysis failed")
+        QMessageBox.critical(self, "Analysis failed", err)
 
     def reset_timeline_zoom(self) -> None:
         self.view_start = 0.0
@@ -750,12 +815,12 @@ class MainWindow(QMainWindow):
             ax.plot(times, ys, color=color, linewidth=1.2)
         elif kind == "reach":
             ax.plot(times, ys, color=color, linewidth=1.3)
-            ax.axhline(1.5, color="#999999", linewidth=0.7, linestyle="--", alpha=0.7)
-            ax.axhline(3.0, color="#999999", linewidth=0.7, linestyle="--", alpha=0.7)
+            ax.axhline(1.2, color="#999999", linewidth=0.7, linestyle="--", alpha=0.7)
+            ax.axhline(2.5, color="#999999", linewidth=0.7, linestyle="--", alpha=0.7)
             ax.text(
                 self.view_end,
-                1.5,
-                " 收",
+                1.2,
+                " closed",
                 va="bottom",
                 ha="right",
                 fontsize=7,
@@ -764,8 +829,8 @@ class MainWindow(QMainWindow):
             )
             ax.text(
                 self.view_end,
-                3.0,
-                " 全開",
+                2.5,
+                " open",
                 va="bottom",
                 ha="right",
                 fontsize=7,
@@ -784,7 +849,7 @@ class MainWindow(QMainWindow):
                 a, b = ys[i - 1], ys[i]
                 if a != a or b != b:  # NaN
                     continue
-                # 1 = 直線 (cool), 0 = 迂迴 (warm)
+                # 1 = straight (cool), 0 = winding (warm)
                 t = float(np.clip(0.5 * (a + b), 0.0, 1.0))
                 r = int(196 + (80 - 196) * t)
                 g = int(92 + (180 - 92) * t)
@@ -813,13 +878,14 @@ class MainWindow(QMainWindow):
         self.fig.clear()
         self._playhead_lines = []
         self._chart_axes = []
+        self._chart_bg = None
         actor = self.selected_actor()
         enabled = self._enabled_series()
         n = len(enabled)
 
         if not actor or not actor.metrics:
             ax = self.fig.add_subplot(111)
-            ax.text(0.5, 0.5, "尚無分析資料", ha="center", va="center")
+            ax.text(0.5, 0.5, "No analysis data", ha="center", va="center")
             ax.set_axis_off()
             self.canvas.draw_idle()
             self.refresh_floor_map()
@@ -827,14 +893,14 @@ class MainWindow(QMainWindow):
 
         if n == 0:
             ax = self.fig.add_subplot(111)
-            ax.text(0.5, 0.5, "請勾選至少一條曲線", ha="center", va="center", transform=ax.transAxes)
+            ax.text(0.5, 0.5, "Select at least one curve", ha="center", va="center", transform=ax.transAxes)
             ax.set_axis_off()
             self.canvas.draw_idle()
             self.refresh_floor_map()
             return
 
-        # Resize figure height to ~70px per row
-        self.fig.set_size_inches(5.0, max(2.0, n * ROW_HEIGHT_IN + 0.6), forward=False)
+        # Match figure inches to canvas widget pixels (HiDPI-safe hit testing)
+        self._sync_chart_figsize()
         axes = self.fig.subplots(n, 1, sharex=True, squeeze=False)
         axes = [axes[i, 0] for i in range(n)]
         self._chart_axes = axes
@@ -853,15 +919,24 @@ class MainWindow(QMainWindow):
             # Row title on the left
             ax.set_title(label, loc="left", fontsize=8, pad=2)
             self._draw_motif_spans(ax, actor.id)
-            ph = ax.axvline(t_now, color="#222222", linewidth=1.4, zorder=5)
+            ph = ax.axvline(t_now, color="#222222", linewidth=1.4, zorder=5, animated=True)
             self._playhead_lines.append(ph)
             if i < n - 1:
                 ax.tick_params(labelbottom=False)
             else:
-                ax.set_xlabel("時間（秒）", fontsize=8)
+                ax.set_xlabel("Time (s)", fontsize=8)
 
-        self.fig.tight_layout(h_pad=0.15)
-        self.canvas.draw_idle()
+        self.fig.subplots_adjust(left=0.12, right=0.98, top=0.92, bottom=0.12, hspace=0.45)
+        self.canvas.draw()  # full bake — capture background for playhead blit
+        try:
+            self._chart_bg = self.canvas.copy_from_bbox(self.fig.bbox)
+            for line in self._playhead_lines:
+                line.set_animated(True)
+                line.axes.draw_artist(line)
+            self.canvas.blit(self.fig.bbox)
+        except Exception:
+            self._chart_bg = None
+            self.canvas.draw_idle()
         self.refresh_floor_map()
 
     def refresh_floor_map(self) -> None:
@@ -876,7 +951,7 @@ class MainWindow(QMainWindow):
         self._floor_ax = ax
         actor = self.selected_actor()
         if not actor or not actor.metrics:
-            ax.text(0.5, 0.5, "尚無走位資料", ha="center", va="center")
+            ax.text(0.5, 0.5, "No floor-map data", ha="center", va="center")
             ax.set_axis_off()
             self.floor_canvas.draw_idle()
             return
@@ -888,7 +963,7 @@ class MainWindow(QMainWindow):
             if self.view_start <= m.time <= self.view_end
         ]
         if len(pts) < 1:
-            ax.text(0.5, 0.5, "此時間窗無走位點", ha="center", va="center")
+            ax.text(0.5, 0.5, "No points in this time window", ha="center", va="center")
             ax.set_axis_off()
             self.floor_canvas.draw_idle()
             return
@@ -931,18 +1006,44 @@ class MainWindow(QMainWindow):
 
         ax.set_xticks([])
         ax.set_yticks([])
-        ax.set_title("走位圖（畫面座標）", fontsize=9)
+        ax.set_title("Floor map (screen coords)", fontsize=9)
         for spine in ax.spines.values():
             spine.set_color("#aaaaaa")
         self.floor_fig.tight_layout()
         self.floor_canvas.draw_idle()
 
-    def update_playhead(self, t: float) -> None:
+    def update_playhead(self, t: float, *, force: bool = False) -> None:
+        if self.playing and not force:
+            now = time.perf_counter()
+            if now - self._last_playhead_wall < PLAYHEAD_MIN_INTERVAL_S:
+                return
+            self._last_playhead_wall = now
+
         if self._playhead_lines:
             for line in self._playhead_lines:
                 line.set_xdata([t, t])
-            self.canvas.draw_idle()
-        # Move floor-map dot without full redraw when possible
+            # While playing: blit over baked background (no full replot)
+            if self.playing and self._chart_bg is not None and not force:
+                try:
+                    self.canvas.restore_region(self._chart_bg)
+                    for line in self._playhead_lines:
+                        line.axes.draw_artist(line)
+                    self.canvas.blit(self.fig.bbox)
+                except Exception:
+                    self.canvas.draw_idle()
+            else:
+                self.canvas.draw_idle()
+                # Re-bake after forced/paused redraw
+                if not self.playing:
+                    try:
+                        self.canvas.draw()
+                        self._chart_bg = self.canvas.copy_from_bbox(self.fig.bbox)
+                    except Exception:
+                        self._chart_bg = None
+
+        # Floor map: skip while playing (catch up on pause)
+        if self.playing and not force:
+            return
         if self._floor_ax is not None and self.floor_toggle.isChecked():
             actor = self.selected_actor()
             if actor and actor.metrics:
@@ -958,22 +1059,50 @@ class MainWindow(QMainWindow):
                         self.floor_canvas.draw_idle()
 
     def on_chart_click(self, event) -> None:
-        if event.inaxes is None or event.xdata is None:
+        if not self._video_ready or self.frame_count <= 0:
             return
-        if self.cap is None or self.frame_count <= 0:
+        if event.x is None or event.y is None or not self._chart_axes:
             return
-        if event.inaxes not in self._chart_axes:
+
+        t: float | None = None
+        # Prefer display→data mapping so HiDPI / margin clicks stay aligned
+        for ax in self._chart_axes:
+            bbox = ax.get_window_extent()
+            if event.y < bbox.y0 or event.y > bbox.y1:
+                continue
+            try:
+                xdata, _ydata = ax.transData.inverted().transform((event.x, event.y))
+            except Exception:
+                continue
+            x0, x1 = ax.get_xlim()
+            # Clamp to visible window (allows clicks in the row's y-label gutter)
+            t = float(min(max(xdata, min(x0, x1)), max(x0, x1)))
+            break
+
+        if t is None and event.inaxes in self._chart_axes and event.xdata is not None:
+            t = float(event.xdata)
+        if t is None:
             return
+
         self.playing = False
-        self.play_btn.setText("播放")
-        self.timer.stop()
-        self.seek_time(float(event.xdata))
-        self.status.setText(f"跳至 {float(event.xdata):.2f}s")
+        self.play_btn.setText("Play")
+        self.seek_time(t)
+        self.status.setText(f"Seek {t:.2f}s")
 
     def fill_occurrence_list(self, mtype: MotifType) -> None:
         self.occ_list.clear()
         for i, occ in enumerate(mtype.occurrences, start=1):
-            item = QListWidgetItem(f"#{i}  {occ.start:.1f}s–{occ.end:.1f}s")
+            if getattr(occ, "is_query", False):
+                label = f"#{i}  {occ.start:.1f}s–{occ.end:.1f}s  ·  query"
+            else:
+                bits = [f"#{i}  {occ.start:.1f}s–{occ.end:.1f}s"]
+                if occ.score is not None:
+                    bits.append(f"{occ.score * 100:.0f}%")
+                tempo = format_tempo_label(getattr(occ, "tempo_ratio", None))
+                if tempo:
+                    bits.append(tempo)
+                label = "  ·  ".join(bits)
+            item = QListWidgetItem(label)
             item.setData(Qt.ItemDataRole.UserRole, occ.id)
             self.occ_list.addItem(item)
 
@@ -1012,8 +1141,8 @@ class MainWindow(QMainWindow):
                     self.actor_combo.blockSignals(False)
                     break
         self.playing = False
-        self.play_btn.setText("播放")
-        self.timer.stop()
+        self.play_btn.setText("Play")
+        self.sync_overlay()
         self.seek_time(occ.start)
         if select_in_list:
             for row in range(self.occ_list.count()):
@@ -1021,7 +1150,7 @@ class MainWindow(QMainWindow):
                     self.occ_list.setCurrentRow(row)
                     break
         self.refresh_chart()
-        self.status.setText(f"出現處 {occ.start:.1f}s–{occ.end:.1f}s")
+        self.status.setText(f"Occurrence {occ.start:.1f}s–{occ.end:.1f}s")
 
     def on_motif_clicked(self, item: QListWidgetItem) -> None:
         mid = item.data(Qt.ItemDataRole.UserRole)
@@ -1064,25 +1193,24 @@ class MainWindow(QMainWindow):
         mtype = next((m for m in self.analysis.motifTypes if m.id == mid), None)
         if not mtype:
             return
-        name, ok = QInputDialog.getText(self, "重新命名", "類型名稱：", text=mtype.name)
+        name, ok = QInputDialog.getText(self, "Rename", "Type name:", text=mtype.name)
         if not ok or not name.strip():
             return
         mtype.name = name.strip()
         n = len(mtype.occurrences)
-        item.setText(f"{mtype.name}  ·  {n} 次")
+        item.setText(f"{mtype.name}  ·  {n}×")
         self._dirty = True
         self.refresh_chart()
-        self.status.setText("已改名（未儲存）")
+        self.status.setText("Renamed (unsaved)")
 
     def closeEvent(self, event) -> None:  # noqa: N802
-        self.timer.stop()
-        if self.cap is not None:
-            self.cap.release()
+        self.playing = False
+        self.decode.shutdown()
         super().closeEvent(event)
 
 
 def run_app() -> None:
-    _configure_matplotlib_cjk()
+    _configure_matplotlib()
     app = QApplication.instance() or QApplication([])
     win = MainWindow()
     win.show()

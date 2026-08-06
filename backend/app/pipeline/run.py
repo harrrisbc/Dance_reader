@@ -5,8 +5,8 @@ from pathlib import Path
 
 from app.jobs import JobStore
 from app.pipeline.annotate import write_overlay
-from app.pipeline.metrics import compute_metrics, enrich_metrics
-from app.pipeline.motifs import detect_motif_types
+from app.pipeline.metrics import compute_metrics, enrich_metrics, frame_aspect
+from app.pipeline.motifs import LAST_DETECT_STATS, detect_motif_types
 from app.pipeline.pose_track import (
     DEFAULT_MAX_PEOPLE,
     DEFAULT_MODEL,
@@ -19,11 +19,13 @@ from app.schemas import Actor, AnalysisResult, PoseFrame
 
 
 def _actor_label(index: int) -> str:
-    return f"舞者 {index}"
+    return f"Dancer {index}"
 
 
 def _buffers_to_actors(
     buffers: dict[int, TrackBuffer],
+    *,
+    aspect: float,
 ) -> tuple[list[Actor], dict[str, TrackBuffer]]:
     # Stable order by track id; drop very short tracks
     sorted_ids = sorted(buffers.keys())
@@ -42,7 +44,7 @@ def _buffers_to_actors(
             )
             for p in buf.poses
         ]
-        metrics = compute_metrics(buf)
+        metrics = compute_metrics(buf, aspect=aspect)
         actors.append(
             Actor(
                 id=actor_id,
@@ -73,10 +75,10 @@ def analyze_video(
         if progress_cb:
             progress_cb(p, msg)
 
-    progress(0.02, "載入模型")
+    progress(0.02, "Loading model")
     model = load_model(model_name)
 
-    progress(0.05, "姿態追蹤中")
+    progress(0.05, "Tracking poses")
     buffers, duration, fps, frame_w, frame_h = track_video(
         str(video_path),
         model,
@@ -85,11 +87,13 @@ def analyze_video(
         progress_cb=progress,
     )
 
-    progress(0.65, "計算能量／速度／空間指標")
-    actors, keyed = _buffers_to_actors(buffers)
+    progress(0.65, "Computing energy / speed / space metrics")
+    aspect = frame_aspect(int(frame_w), int(frame_h))
+    actors, keyed = _buffers_to_actors(buffers, aspect=aspect)
 
-    progress(0.72, "偵測重複動作類型")
-    motif_types = detect_motif_types(keyed)
+    progress(0.72, "Detecting motif types")
+    motif_types = detect_motif_types(keyed, aspect=aspect)
+    motif_diag = LAST_DETECT_STATS.detail()
 
     result = AnalysisResult(
         version=1,  # MetricPoint may gain fields; defaults keep old JSON loadable
@@ -100,6 +104,7 @@ def analyze_video(
         actors=actors,
         motifTypes=motif_types,
         manualMarks=[],
+        motifDiag=motif_diag,
     )
     enrich_metrics(result)
 
@@ -113,7 +118,7 @@ def analyze_video(
         )
 
     if write_overlay_video and actors and artifacts_dir is not None and job_id is not None:
-        progress(0.85, "產生預覽影片")
+        progress(0.85, "Writing preview video")
         overlay_path = artifacts_dir / job_id / "overlay.mp4"
         try:
             write_overlay(
@@ -127,7 +132,7 @@ def analyze_video(
         except Exception:
             overlay_path = None
 
-    progress(1.0, "分析完成")
+    progress(1.0, "Analysis complete")
     return result, overlay_path, buffers
 
 
@@ -146,7 +151,7 @@ def run_pipeline(
         store.update(job_id, status="running", progress=p, message=msg)
 
     try:
-        store.update(job_id, status="running", progress=0.02, message="載入模型")
+        store.update(job_id, status="running", progress=0.02, message="Loading model")
         result, overlay_path, _buffers = analyze_video(
             video_path,
             stride=stride,
@@ -161,7 +166,7 @@ def run_pipeline(
             job_id,
             status="done",
             progress=1.0,
-            message="分析完成",
+            message="Analysis complete",
             result=result,
             overlay_path=overlay_path,
         )
@@ -170,6 +175,6 @@ def run_pipeline(
             job_id,
             status="error",
             progress=1.0,
-            message="分析失敗",
+            message="Analysis failed",
             error=str(exc),
         )

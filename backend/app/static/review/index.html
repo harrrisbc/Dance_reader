@@ -1,0 +1,78 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Dance Analyser — Review</title>
+  <link rel="stylesheet" href="/static/review/review.css?v=20260806c" />
+  <script src="https://cdn.jsdelivr.net/npm/uplot@1.6.31/dist/uPlot.iife.min.js"></script>
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/uplot@1.6.31/dist/uPlot.min.css" />
+</head>
+<body>
+  <header class="top">
+    <div class="brand">
+      <h1>Dance Analyser</h1>
+      <p class="tag">Local review · interactive timeline</p>
+    </div>
+    <div class="actions">
+      <label class="btn">
+        Open project
+        <input id="projectFile" type="file" accept=".json,.dance.json,application/json" hidden />
+      </label>
+      <label class="btn ghost">
+        Choose video
+        <input id="videoFile" type="file" accept="video/*" hidden />
+      </label>
+      <button id="btnResetZoom" class="btn ghost" type="button">Reset time window</button>
+      <span id="deviceBadge" class="badge">Device…</span>
+    </div>
+  </header>
+
+  <p id="status" class="status">Open a <code>.dance.json</code> project (video path must be readable on this machine).</p>
+
+  <main class="layout">
+    <section class="stage">
+      <div class="video-wrap">
+        <video id="video" controls playsinline></video>
+        <canvas id="skeletonOverlay" aria-hidden="true"></canvas>
+      </div>
+      <div class="transport">
+        <button id="btnPlay" type="button" class="btn">Play</button>
+        <span id="clock">0:00 / 0:00</span>
+      </div>
+      <div class="actor-row">
+        <span>Dancer</span>
+        <select id="actorSelect"></select>
+        <label class="skel-toggle" title="Lines may cross when limbs overlap in the camera view.">
+          Overlay
+          <select id="skelStyle">
+            <option value="skeleton">Skeleton</option>
+            <option value="joints">Joints only</option>
+            <option value="off">Off</option>
+          </select>
+        </label>
+        <label class="skel-toggle" title="Draw every tracked dancer (distinct colors).">
+          <input id="skeletonAll" type="checkbox" />
+          All dancers
+        </label>
+      </div>
+      <div class="series-row" id="seriesToggles"></div>
+      <div class="motifs">
+        <h2>Motif types</h2>
+        <ul id="motifList"></ul>
+      </div>
+    </section>
+
+    <section class="charts">
+      <div id="chartStack"></div>
+      <div class="floor-wrap">
+        <h2>Floor map (screen coords)</h2>
+        <canvas id="floorMap" width="640" height="360"></canvas>
+        <p class="hint">Screen coordinates, not true stage space. Scroll to zoom time; drag to brush-zoom; click a chart to seek.</p>
+      </div>
+    </section>
+  </main>
+
+  <script src="/static/review/review.js?v=20260806c"></script>
+</body>
+</html>
