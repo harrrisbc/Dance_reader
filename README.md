@@ -18,7 +18,7 @@ Opens the Qt window (no browser).
 1. **Open video** ??choose a local file (download YouTube clips first; no YouTube API yet).
 2. Set **Max dancers** and **Model** (S fast default, or M for occlusion / side views), then **Analyze**.
 3. After analysis: stacked metric charts, skeleton overlay, floor map, motif types.
-4. Click a chart to seek; scroll to zoom the time window; **Find similar** for matches near the playhead.
+4. Current time / duration sits left of the frame slider (`0:08.42 / 0:16.20`). Click a chart to seek; scroll to zoom; **Find similar** near the playhead.
 5. **Save project** (`.dance.json`) / **Open project** to reload without re-analyzing.
 
 Status bar shows motif diagnostics after analyze, e.g.  

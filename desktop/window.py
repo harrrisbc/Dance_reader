@@ -9,7 +9,7 @@ import numpy as np
 from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg
 from matplotlib.figure import Figure
 from PySide6.QtCore import Qt, QThread, Signal
-from PySide6.QtGui import QImage, QPixmap
+from PySide6.QtGui import QFont, QImage, QPixmap
 from PySide6.QtWidgets import (
     QApplication,
     QCheckBox,
@@ -60,6 +60,20 @@ BACKEND = ROOT / "backend"
 ARTIFACTS = BACKEND / "artifacts"
 ZOOM_MIN_WINDOW_S = 2.0
 PLAYHEAD_MIN_INTERVAL_S = 0.1  # ~10 Hz chart/floor updates while playing
+TIME_READOUT_EMPTY = "--:--.-- / --:--.--"
+
+
+def format_timecode(seconds: float) -> str:
+    """Minutes:seconds with two decimal places, e.g. 0:08.42."""
+    s = max(0.0, float(seconds))
+    minutes = int(s // 60)
+    rem = s - minutes * 60
+    return f"{minutes}:{rem:05.2f}"
+
+
+def format_time_readout(current_s: float, duration_s: float) -> str:
+    return f"{format_timecode(current_s)} / {format_timecode(duration_s)}"
+
 
 # Chart series: attr, label, color, default_on, kind, ylabel, ylim
 # kind: area | line | level | travel | ribbon | pos
@@ -188,6 +202,20 @@ class MainWindow(QMainWindow):
         self.slider = QSlider(Qt.Orientation.Horizontal)
         self.slider.sliderMoved.connect(self.on_seek)
         self.slider.sliderReleased.connect(self.on_seek_release)
+
+        self.time_label = QLabel(TIME_READOUT_EMPTY)
+        self.time_label.setObjectName("timeReadout")
+        self.time_label.setToolTip("Current time / duration")
+        mono = QFont("Consolas")
+        if not mono.exactMatch():
+            mono = QFont("Courier New")
+        mono.setStyleHint(QFont.StyleHint.Monospace)
+        mono.setPointSize(10)
+        self.time_label.setFont(mono)
+        self.time_label.setMinimumWidth(128)
+        self.time_label.setAlignment(
+            Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
+        )
 
         self.motif_list = QListWidget()
         self.motif_list.itemClicked.connect(self.on_motif_clicked)
@@ -319,7 +347,10 @@ class MainWindow(QMainWindow):
         body = QHBoxLayout()
         left = QVBoxLayout()
         left.addWidget(self.video_label, stretch=1)
-        left.addWidget(self.slider)
+        transport = QHBoxLayout()
+        transport.addWidget(self.time_label)
+        transport.addWidget(self.slider, stretch=1)
+        left.addLayout(transport)
         body.addLayout(left, stretch=3)
         body.addLayout(right, stretch=2)
 
@@ -372,6 +403,7 @@ class MainWindow(QMainWindow):
         self.play_btn.setText("Play")
         if clear_analysis:
             self.status.setText(str(path.name))
+        self._set_time_readout(None)
         self.decode.request("open", path)
 
     def on_decode_opened(self, fps: float, frame_count: int) -> None:
@@ -384,10 +416,12 @@ class MainWindow(QMainWindow):
         self.slider.setMaximum(max(0, self.frame_count - 1))
         self.slider.setValue(0)
         self._video_ready = True
+        self._set_time_readout(0.0)
         self.sync_overlay()
 
     def on_decode_error(self, msg: str) -> None:
         self._video_ready = False
+        self._set_time_readout(None)
         QMessageBox.warning(self, "Error", msg)
 
     def on_decode_ended(self) -> None:
@@ -424,6 +458,13 @@ class MainWindow(QMainWindow):
         if not self._video_ready:
             return 0.0
         return self._display_frame / max(self.fps, 1e-6)
+
+    def _set_time_readout(self, current_s: float | None) -> None:
+        if current_s is None or not self._video_ready:
+            self.time_label.setText(TIME_READOUT_EMPTY)
+            return
+        dur = float(getattr(self, "_duration_s", 0.0) or 0.0)
+        self.time_label.setText(format_time_readout(current_s, dur))
 
     def seek_time(self, t: float) -> None:
         if not self._video_ready or self.frame_count <= 0:
@@ -572,6 +613,7 @@ class MainWindow(QMainWindow):
         else:
             self.refresh_chart()
         self.sync_overlay()
+        self._set_time_readout(self.current_time() if self._video_ready else None)
 
     @staticmethod
     def _motif_type_label(m: MotifType) -> str:
@@ -1020,6 +1062,9 @@ class MainWindow(QMainWindow):
         self.floor_canvas.draw_idle()
 
     def update_playhead(self, t: float, *, force: bool = False) -> None:
+        # Cheap; update every call so the clock stays accurate even when chart/floor throttle
+        self._set_time_readout(float(t) if self._video_ready else None)
+
         if self.playing and not force:
             now = time.perf_counter()
             if now - self._last_playhead_wall < PLAYHEAD_MIN_INTERVAL_S:
@@ -1048,9 +1093,7 @@ class MainWindow(QMainWindow):
                     except Exception:
                         self._chart_bg = None
 
-        # Floor map: skip while playing (catch up on pause)
-        if self.playing and not force:
-            return
+        # Floor map: same ~10 Hz throttle as chart (top of this method); cheap offsets only
         if self._floor_ax is not None and self.floor_toggle.isChecked():
             actor = self.selected_actor()
             if actor and actor.metrics:

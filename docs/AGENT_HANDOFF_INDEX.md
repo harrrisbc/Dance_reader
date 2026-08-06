@@ -4,6 +4,8 @@ Design agent maintains this list. Programming agent: work **top to bottom** unle
 
 | Status | Topic | Handoff | Notes |
 |--------|--------|---------|--------|
+| done | **P1** Always-visible time readout | [AGENT_HANDOFF_TIME_READOUT.md](./AGENT_HANDOFF_TIME_READOUT.md) | `0:08.42 / 0:16.20` left of slider; clock before chart throttle |
+| done | **P0** Floor map live during play | [AGENT_HANDOFF_FLOOR_LIVE.md](./AGENT_HANDOFF_FLOOR_LIVE.md) | Floor dot throttled ~10 Hz while playing; no freeze-until-pause |
 | done | **P0** Motif over-merge | [AGENT_HANDOFF_MOTIF_OVERMERGE.md](./AGENT_HANDOFF_MOTIF_OVERMERGE.md) | complete @ 0.24/0.26; no mega-type; precision > recall |
 | done | **W1** Calibration tooling | [AGENT_HANDOFF_MATCH_W1_TOOLING.md](./AGENT_HANDOFF_MATCH_W1_TOOLING.md) | Vectorised DTW identity-tested; `hi.dance.json` negative fixture; distance-unit calibration |
 | done | **W2** Feature correctness | [AGENT_HANDOFF_MATCH_W2_FEATURES.md](./AGENT_HANDOFF_MATCH_W2_FEATURES.md) | Masks + energy scale + SG smooth + drop penalty; distances compressed → W3 must retune |
