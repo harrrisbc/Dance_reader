@@ -4,6 +4,7 @@ Design agent maintains this list. Programming agent: work **top to bottom** unle
 
 | Status | Topic | Handoff | Notes |
 |--------|--------|---------|--------|
+| done | **P0** Motif over-merge | [AGENT_HANDOFF_MOTIF_OVERMERGE.md](./AGENT_HANDOFF_MOTIF_OVERMERGE.md) | complete @ 0.24/0.26; no mega-type; precision > recall |
 | done | **W1** Calibration tooling | [AGENT_HANDOFF_MATCH_W1_TOOLING.md](./AGENT_HANDOFF_MATCH_W1_TOOLING.md) | Vectorised DTW identity-tested; `hi.dance.json` negative fixture; distance-unit calibration |
 | done | **W2** Feature correctness | [AGENT_HANDOFF_MATCH_W2_FEATURES.md](./AGENT_HANDOFF_MATCH_W2_FEATURES.md) | Masks + energy scale + SG smooth + drop penalty; distances compressed → W3 must retune |
 | done | **W3** Thresholds in distance units | [AGENT_HANDOFF_MATCH_W3_THRESHOLDS.md](./AGENT_HANDOFF_MATCH_W3_THRESHOLDS.md) | Raw DTW gates 0.28/0.30 + min_occ=3; neg→0; display % only |

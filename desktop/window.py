@@ -560,7 +560,7 @@ class MainWindow(QMainWindow):
         self.motif_list.clear()
         self.occ_list.clear()
         for m in result.motifTypes:
-            item = QListWidgetItem(f"{m.name}  ·  {len(m.occurrences)}×")
+            item = QListWidgetItem(self._motif_type_label(m))
             item.setData(Qt.ItemDataRole.UserRole, m.id)
             self.motif_list.addItem(item)
         if result.motifTypes:
@@ -572,6 +572,13 @@ class MainWindow(QMainWindow):
         else:
             self.refresh_chart()
         self.sync_overlay()
+
+    @staticmethod
+    def _motif_type_label(m: MotifType) -> str:
+        label = f"{m.name}  ·  {len(m.occurrences)}×"
+        if m.meanIntraDist is not None:
+            label += f"  ·  d̄={m.meanIntraDist:.2f}"
+        return label
 
     def save_project_dialog(self) -> None:
         if not self.analysis or self.video_path is None:
@@ -718,7 +725,7 @@ class MainWindow(QMainWindow):
 
         self.motif_list.clear()
         for m in self.analysis.motifTypes:
-            item = QListWidgetItem(f"{m.name}  ·  {len(m.occurrences)}×")
+            item = QListWidgetItem(self._motif_type_label(m))
             item.setData(Qt.ItemDataRole.UserRole, m.id)
             self.motif_list.addItem(item)
         for row in range(self.motif_list.count()):

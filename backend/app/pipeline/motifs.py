@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 import numpy as np
 from scipy.spatial.distance import cdist
@@ -39,12 +39,15 @@ PHRASE_MIN_S = 0.65
 PHRASE_MAX_S = 2.8
 SEQ_FRAMES = 14
 EMBED_SAMPLES = 10
-# Clustering / matching gates in **raw mask-aware DTW distance** (Wave 3).
+# Clustering / matching gates in **raw mask-aware DTW distance**.
 # Distance = mean per-visible-dim RMS in torso units. Lower = more similar.
-# Calibrated by sweep on positive + negative fixtures — see IMPLEMENTATION_NOTES_MATCH_W3.
-CLUSTER_MAX_DIST = 0.28  # agglomerative average-linkage cut
-INTRA_MAX_DIST = 0.30  # mean pairwise distance within a kept cluster
+# Auto discovery: precision > recall (see IMPLEMENTATION_NOTES_MOTIF_OVERMERGE).
+# Find Similar uses SUBSEQ_* — do not loosen those to compensate discovery cuts.
+CLUSTER_MAX_DIST = 0.24  # agglomerative cut (0.22–0.24 band)
+INTRA_MAX_DIST = 0.26  # mean pairwise distance within a kept cluster
+CLUSTER_LINKAGE = "complete"  # max pairwise must clear cut (stops A~B~C chains)
 MATCH_MAX_DIST = 0.28  # legacy name; segment gates / docs
+
 # Find-similar subsequence DTW accept if d <= this (slightly above segment MATCH)
 SUBSEQ_MATCH_MAX_DIST = 0.30
 # Display-only: d=0 → 100%, d>=DISPLAY_DIST_ZERO → 0%. Never used as a gate.
@@ -105,12 +108,17 @@ class MotifDetectStats:
     dropped_intra: int = 0
     dropped_nms: int = 0
     types_kept: int = 0
+    # Mean pairwise DTW per kept type (UI / calibration honesty)
+    type_mean_intras: list[float] = field(default_factory=list)
 
     def summary(self) -> str:
         base = (
             f"{self.phrases} phrases · {self.clusters} clusters · "
             f"{self.types_kept} passed distance {INTRA_MAX_DIST:.2f}"
         )
+        if self.type_mean_intras:
+            bits = ", ".join(f"{d:.2f}" for d in self.type_mean_intras)
+            base += f" · mean_intra=[{bits}]"
         if self.types_kept > 0 or self.phrases < 2:
             return base
         # Explain emptiness — which gate wiped the result
@@ -764,6 +772,7 @@ def _cluster_segments(
     segments: list[Segment],
     *,
     distance_threshold: float = CLUSTER_MAX_DIST,
+    linkage: str = CLUSTER_LINKAGE,
 ) -> list[int]:
     if not segments:
         return []
@@ -774,7 +783,7 @@ def _cluster_segments(
     clustering = AgglomerativeClustering(
         n_clusters=None,
         metric="precomputed",
-        linkage="average",
+        linkage=linkage,
         distance_threshold=distance_threshold,
     )
     labels = clustering.fit_predict(dist)
@@ -850,7 +859,8 @@ def _segments_to_motif_types(
         if mean_motion < MOTION_SPEED_MIN:
             stats.dropped_motion_mean += 1
             continue
-        if _mean_intra_dist(segments, idxs) > intra_max_dist:
+        mean_intra = _mean_intra_dist(segments, idxs)
+        if mean_intra > intra_max_dist:
             stats.dropped_intra += 1
             continue
 
@@ -878,8 +888,10 @@ def _segments_to_motif_types(
                 name=f"{name_prefix} {letter}",
                 color=TYPE_COLORS[type_idx % len(TYPE_COLORS)],
                 occurrences=occs,
+                meanIntraDist=round(mean_intra, 4),
             )
         )
+        stats.type_mean_intras.append(round(mean_intra, 4))
         type_idx += 1
 
     stats.types_kept = len(motif_types)

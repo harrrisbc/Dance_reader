@@ -44,6 +44,8 @@ class MotifType(BaseModel):
     name: str
     color: str
     occurrences: list[MotifOccurrence] = Field(default_factory=list)
+    # Mean pairwise raw DTW within the type (auto-discovery); None for Find Similar
+    meanIntraDist: float | None = None
 
 
 class ManualMark(BaseModel):

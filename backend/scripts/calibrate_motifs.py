@@ -7,6 +7,10 @@ Prints pairwise raw DTW-distance distributions and how many pairs/clusters
 pass the current distance gates. Do not use pixel-identical synthetics.
 
   --negative   No-repeat clip mode: skip time probes; emphasize type-count sweep.
+
+Precision criterion (auto discovery): prefer missing a borderline repeat over
+a mega-type that mixes different moves. False-merge smell: 1 type with ≥6 occ
+on a long clip that also contains walking.
 """
 
 from __future__ import annotations
@@ -27,6 +31,7 @@ if str(ROOT) not in sys.path:
 
 from app.pipeline.metrics import enrich_metrics, frame_aspect  # noqa: E402
 from app.pipeline.motifs import (  # noqa: E402
+    CLUSTER_LINKAGE,
     CLUSTER_MAX_DIST,
     COSINE_PREFILTER,
     COSINE_REJECT_DIST,
@@ -55,6 +60,10 @@ TRAVEL_YLIM = (0.0, 2.5)
 
 # Candidate raw-DTW distance cuts for sweep reporting
 DIST_THRESHOLDS = (0.12, 0.16, 0.18, 0.20, 0.22, 0.24, 0.26, 0.28, 0.30, 0.32, 0.35)
+
+# False-merge smell: single mega-type on a clip long enough to contain walk + gesture
+MEGA_TYPE_OCC_SMELL = 6
+MEGA_TYPE_DURATION_S = 12.0
 
 
 def _percentile(xs: list[float], p: float) -> float:
@@ -107,14 +116,48 @@ def _metric_stats(analysis: AnalysisResult) -> None:
     )
 
 
-def _type_sweep(segs: list, *, negative: bool) -> None:
+def _false_merge_flags(
+    types: list,
+    *,
+    duration_s: float,
+    negative: bool,
+) -> list[str]:
+    """Precision-oriented smells — do not treat 'all probes in one type' as success."""
+    flags: list[str] = []
+    if negative:
+        if len(types) > 0:
+            flags.append(f"NEG_HAS_TYPES={len(types)} (want 0)")
+        return flags
+    n_types = len(types)
+    if n_types == 0:
+        flags.append("ZERO_TYPES (may be over-tight)")
+    if n_types == 1 and duration_s >= MEGA_TYPE_DURATION_S:
+        n_occ = len(types[0].occurrences)
+        if n_occ >= MEGA_TYPE_OCC_SMELL:
+            flags.append(
+                f"MEGA_TYPE smell: 1 type with {n_occ} occ on {duration_s:.1f}s clip "
+                f"(prefer ≥2 types or fewer occ)"
+            )
+    if n_types >= 2:
+        flags.append(f"SPLIT_OK: {n_types} types (precision-friendly cardinality)")
+    return flags
+
+
+def _type_sweep(segs: list, *, negative: bool, duration_s: float, linkage: str) -> None:
     print(
         "Types at candidate distance thresholds "
-        f"(cluster_max / intra_max / min_occ={MOTIF_MIN_OCCURRENCES}):"
+        f"(linkage={linkage} / cluster_max / intra_max / "
+        f"min_occ={MOTIF_MIN_OCCURRENCES}):"
+    )
+    print(
+        "  Criterion: precision > recall — flag MEGA_TYPE; "
+        "neg want 0 types; prefer ≥2 types on mixed clips."
     )
     for cluster_d in DIST_THRESHOLDS:
         for intra in (cluster_d, round(cluster_d + 0.02, 2)):
-            labels = _cluster_segments(segs, distance_threshold=cluster_d)
+            labels = _cluster_segments(
+                segs, distance_threshold=cluster_d, linkage=linkage
+            )
             stats = MotifDetectStats()
             types = _segments_to_motif_types(
                 segs,
@@ -127,18 +170,36 @@ def _type_sweep(segs: list, *, negative: bool) -> None:
             if (
                 abs(cluster_d - CLUSTER_MAX_DIST) < 1e-9
                 and abs(intra - INTRA_MAX_DIST) < 1e-9
+                and linkage == CLUSTER_LINKAGE
             ):
                 mark = " ← current"
+            smell = ""
+            if (
+                not negative
+                and len(types) == 1
+                and duration_s >= MEGA_TYPE_DURATION_S
+                and len(types[0].occurrences) >= MEGA_TYPE_OCC_SMELL
+            ):
+                smell = " MEGA"
             print(
                 f"  cluster≤{cluster_d:.2f} intra≤{intra:.2f}: "
                 f"{len(types)} type(s) "
                 f"(clusters={stats.clusters} drop_intra={stats.dropped_intra} "
-                f"drop_nms={stats.dropped_nms}){mark}"
+                f"drop_nms={stats.dropped_nms}){smell}{mark}"
             )
     if negative:
-        print(
-            "  (negative fixture: want 0 types at the chosen gate)"
+        print("  (negative fixture: want 0 types at the chosen gate)")
+
+
+def _print_type_membership(types: list) -> None:
+    for t in types:
+        spans = ", ".join(f"{o.start:.1f}–{o.end:.1f}" for o in t.occurrences)
+        intra = (
+            f" mean_intra={t.meanIntraDist:.3f}"
+            if t.meanIntraDist is not None
+            else ""
         )
+        print(f"  - {t.name}: {len(t.occurrences)} occ{intra} [{spans}]")
 
 
 def main() -> int:
@@ -150,18 +211,27 @@ def main() -> int:
         nargs="*",
         default=None,
         help="Times (s) to compare as a known repeated phrase "
-        "(default 8 10 12; empty list disables; ignored with --negative)",
+        "(default 8 10 12; empty list disables; ignored with --negative). "
+        "Named false-merge pairs: require different types after retune when supplied.",
     )
     parser.add_argument(
         "--negative",
         action="store_true",
         help="No-repeat fixture mode: skip time probes; emphasize type-count sweep",
     )
+    parser.add_argument(
+        "--linkage",
+        choices=("average", "complete"),
+        default=None,
+        help=f"Agglomerative linkage for sweep (default: current {CLUSTER_LINKAGE})",
+    )
     args = parser.parse_args()
     path = args.project
     if not path.is_file():
         print(f"Not found: {path}", file=sys.stderr)
         return 1
+
+    linkage = args.linkage or CLUSTER_LINKAGE
 
     data = json.loads(path.read_text(encoding="utf-8"))
     if "analysis" in data:
@@ -193,12 +263,14 @@ def main() -> int:
         f"(dropped_motion={stats.dropped_motion})"
     )
     print()
-    print("Current distance gates (Wave 3):")
+    print("Current auto-discovery distance gates:")
     print(f"  CLUSTER_MAX_DIST     = {CLUSTER_MAX_DIST}")
     print(f"  INTRA_MAX_DIST       = {INTRA_MAX_DIST}")
-    print(f"  MATCH_MAX_DIST       = {MATCH_MAX_DIST}")
+    print(f"  CLUSTER_LINKAGE      = {CLUSTER_LINKAGE}")
+    print(f"  MATCH_MAX_DIST       = {MATCH_MAX_DIST} (legacy; Find Similar uses SUBSEQ_*)")
     print(f"  MOTIF_MIN_OCCURRENCES = {MOTIF_MIN_OCCURRENCES}")
     print(f"  COSINE_PREFILTER     = {COSINE_PREFILTER}")
+    print(f"  Sweep linkage override = {linkage}")
     print()
 
     if len(segs) < 2:
@@ -244,21 +316,21 @@ def main() -> int:
     else:
         probe_times = list(args.probe)
 
+    probe_segs: list[tuple[float, object]] = []
     if probe_times and len(probe_times) >= 2:
         print("Probe phrases at", probe_times)
-        probes = []
         aid = next(iter(actors))
         for t in probe_times:
             seg = segment_near_time(actors, aid, float(t), aspect=aspect)
             if seg:
-                probes.append((t, seg))
+                probe_segs.append((t, seg))
                 print(f"  t={t:.1f}s → [{seg.start:.2f}, {seg.end:.2f}]")
             else:
                 print(f"  t={t:.1f}s → no segment")
-        for i in range(len(probes)):
-            for j in range(i + 1, len(probes)):
-                ti, a = probes[i]
-                tj, b = probes[j]
+        for i in range(len(probe_segs)):
+            for j in range(i + 1, len(probe_segs)):
+                ti, a = probe_segs[i]
+                tj, b = probe_segs[j]
                 dist = segment_pair_distance(a, b)
                 vis = segment_path_visibility(a, b)
                 score = distance_to_match_score(dist)
@@ -269,16 +341,67 @@ def main() -> int:
                 )
         print()
 
-    _type_sweep(segs, negative=bool(args.negative))
+    _type_sweep(
+        segs,
+        negative=bool(args.negative),
+        duration_s=float(analysis.duration),
+        linkage=linkage,
+    )
     print()
 
     types = detect_motif_types(actors, aspect=aspect)
-    print(f"detect_motif_types → {len(types)} type(s)")
+    print(f"detect_motif_types → {len(types)} type(s) (production gates)")
     print(f"  {LAST_DETECT_STATS.summary()}")
     print(f"  {LAST_DETECT_STATS.detail()}")
-    for t in types:
-        spans = ", ".join(f"{o.start:.1f}–{o.end:.1f}" for o in t.occurrences[:8])
-        print(f"  - {t.name}: {len(t.occurrences)} occ [{spans}]")
+    _print_type_membership(types)
+
+    flags = _false_merge_flags(
+        types, duration_s=float(analysis.duration), negative=bool(args.negative)
+    )
+    print()
+    print("False-merge / precision check:")
+    if flags:
+        for f in flags:
+            print(f"  · {f}")
+    else:
+        print("  · (no flags)")
+
+    # If user named probes that should stay split, report shared type membership
+    if probe_segs and len(types) >= 1 and not args.negative:
+        print()
+        print("Probe co-membership (same type?):")
+        aid = next(iter(actors))
+
+        def _type_for(t: float) -> str | None:
+            for mt in types:
+                for o in mt.occurrences:
+                    if o.start - 0.05 <= t <= o.end + 0.05 or abs(
+                        (o.start + o.end) / 2 - t
+                    ) < 0.8:
+                        # prefer covering span
+                        if o.start - 0.15 <= t <= o.end + 0.15:
+                            return mt.name
+            # fall back: segment-near centres
+            for mt in types:
+                for o in mt.occurrences:
+                    if abs((o.start + o.end) / 2 - t) < 1.0:
+                        return mt.name
+            return None
+
+        # Use segment windows from probes for membership
+        for t, seg in probe_segs:
+            mid = (seg.start + seg.end) / 2
+            owner = None
+            for mt in types:
+                for o in mt.occurrences:
+                    if abs(o.start - seg.start) < 0.15 and abs(o.end - seg.end) < 0.15:
+                        owner = mt.name
+                        break
+                if owner:
+                    break
+            if owner is None:
+                owner = _type_for(mid)
+            print(f"  t≈{t:.1f}s [{seg.start:.2f},{seg.end:.2f}] → {owner or 'no type'}")
     return 0
 
 
