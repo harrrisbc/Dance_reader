@@ -60,6 +60,9 @@ TEMPO_RATIO_MAX = 2.0
 SUBSEQ_STRONG_DIST = 0.16
 SUBSEQ_SOFT_MAX_EXTRA = 6
 SUBSEQ_SOFT_SEP_S = 1.5  # min centre separation when keeping soft hits
+# Orphan attach (auto discovery second pass): strong subseq only — do not loosen cluster cuts
+ORPHAN_ATTACH_MAX_DIST = SUBSEQ_STRONG_DIST
+ORPHAN_ATTACH_NEAR_S = 1.25  # |hit mid − orphan mid| or padded overlap
 # Subsequence DTW local-minima: peak must beat neighbors by this fraction of MATCH_MAX_DIST
 SUBSEQ_MINIMA_REL = 0.02
 # Cheap cosine pre-filter before DTW verify (reject only — do not invent scores)
@@ -110,6 +113,7 @@ class MotifDetectStats:
     types_kept: int = 0
     # Mean pairwise DTW per kept type (UI / calibration honesty)
     type_mean_intras: list[float] = field(default_factory=list)
+    orphan_attaches: int = 0
 
     def summary(self) -> str:
         base = (
@@ -119,6 +123,8 @@ class MotifDetectStats:
         if self.type_mean_intras:
             bits = ", ".join(f"{d:.2f}" for d in self.type_mean_intras)
             base += f" · mean_intra=[{bits}]"
+        if self.orphan_attaches > 0:
+            base += f" · +{self.orphan_attaches} orphan attaches"
         if self.types_kept > 0 or self.phrases < 2:
             return base
         # Explain emptiness — which gate wiped the result
@@ -898,6 +904,255 @@ def _segments_to_motif_types(
     return motif_types
 
 
+def _interval_iou(a0: float, a1: float, b0: float, b1: float) -> float:
+    inter = max(0.0, min(a1, b1) - max(a0, b0))
+    union = max(a1, b1) - min(a0, b0)
+    return float(inter / union) if union > 0 else 0.0
+
+
+def _occurrence_covers_segment(occ: MotifOccurrence, seg: Segment, *, iou_thresh: float = NMS_IOU) -> bool:
+    if occ.actorId != seg.actor_id:
+        return False
+    return _interval_iou(occ.start, occ.end, seg.start, seg.end) >= iou_thresh
+
+
+def _orphan_segments(
+    segments: list[Segment],
+    types: list[MotifType],
+) -> list[Segment]:
+    """Motion-gated phrases not already represented in any kept type."""
+    occs = [o for t in types for o in t.occurrences]
+    orphans: list[Segment] = []
+    for seg in segments:
+        if any(_occurrence_covers_segment(o, seg) for o in occs):
+            continue
+        orphans.append(seg)
+    return orphans
+
+
+def _type_exemplar_occurrence(mtype: MotifType) -> MotifOccurrence | None:
+    if not mtype.occurrences:
+        return None
+    centres = [(o.start + o.end) * 0.5 for o in mtype.occurrences]
+    median_c = float(np.median(np.asarray(centres, dtype=np.float64)))
+    return min(mtype.occurrences, key=lambda o: abs((o.start + o.end) * 0.5 - median_c))
+
+
+def _hit_near_orphan(
+    hit_start: float,
+    hit_end: float,
+    orphan: Segment,
+    *,
+    near_s: float = ORPHAN_ATTACH_NEAR_S,
+) -> bool:
+    if _interval_iou(hit_start, hit_end, orphan.start, orphan.end) >= 0.20:
+        return True
+    hm = 0.5 * (hit_start + hit_end)
+    om = 0.5 * (orphan.start + orphan.end)
+    if abs(hm - om) <= near_s:
+        return True
+    # Valley box often ends before the true gesture centre (~8 s vs [6.9,7.5])
+    if (orphan.start - 0.35) <= hm <= (orphan.end + near_s):
+        return True
+    return False
+
+
+def _collect_subseq_hits(
+    actors: dict[str, TrackBuffer],
+    query: Segment,
+    *,
+    match_max_dist: float,
+) -> list[tuple[float, float, float, float]]:
+    """
+    Open-begin subsequence DTW hits on the query's track.
+
+    Returns list of (start, end, dist, tempo_ratio), best-distance first after NMS,
+    excluding heavy overlap with the query seed. Does not apply Find-Similar soft tiering.
+    """
+    buf = actors.get(query.actor_id)
+    if buf is None or len(buf.poses) < 4:
+        return []
+
+    poses = buf.poses
+    times_all = np.asarray([p.time for p in poses], dtype=np.float64)
+    track_idxs = np.arange(len(poses), dtype=np.int64)
+    track = _poses_feature_series(
+        poses, track_idxs, actor_id=query.actor_id, mirrored=False
+    )
+    track_m = _poses_feature_series(
+        poses, track_idxs, actor_id=query.actor_id, mirrored=True
+    )
+    if track is None:
+        return []
+    ref_seq, ref_mask, ref_times = track
+
+    q_idxs = np.where((times_all >= query.start) & (times_all <= query.end))[0]
+    if len(q_idxs) < 4:
+        i0 = int(np.argmin(np.abs(times_all - query.start)))
+        i1 = int(np.argmin(np.abs(times_all - query.end)))
+        if i1 < i0:
+            i0, i1 = i1, i0
+        q_idxs = np.arange(i0, max(i0 + 1, i1 + 1), dtype=np.int64)
+    q_pack = _poses_feature_series(
+        poses, q_idxs, actor_id=query.actor_id, mirrored=False
+    )
+    if q_pack is None:
+        return []
+    q_seq, q_mask, _q_times = q_pack
+    query_dur = max(float(query.end - query.start), 1e-3)
+
+    candidates: list[tuple[float, float, float]] = []
+    for ref_s, ref_mk in (
+        (ref_seq, ref_mask),
+        (track_m[0], track_m[1]) if track_m is not None else (None, None),
+    ):
+        if ref_s is None or ref_mk is None:
+            continue
+        end_cost, start_idx = _subsequence_end_costs(q_seq, q_mask, ref_s, ref_mk)
+        candidates.extend(
+            _local_minima_hits(
+                end_cost,
+                start_idx,
+                ref_times,
+                match_max_dist=match_max_dist,
+                query_start=query.start,
+                query_end=query.end,
+                query_dur=query_dur,
+            )
+        )
+
+    filtered: list[tuple[float, float, float, float]] = []
+    for t0, t1, dist in candidates:
+        ratio = _tempo_ratio(t1 - t0, query_dur)
+        if not _tempo_in_bounds(ratio):
+            continue
+        if _interval_iou(query.start, query.end, t0, t1) >= NMS_IOU:
+            continue
+        filtered.append((t0, t1, dist, ratio))
+
+    kept: list[tuple[float, float, float, float]] = []
+    for t0, t1, dist, ratio in sorted(filtered, key=lambda h: h[2]):
+        drop = False
+        for k0, k1, _kd, _kr in kept:
+            if _interval_iou(k0, k1, t0, t1) >= NMS_IOU:
+                drop = True
+                break
+        if not drop:
+            kept.append((t0, t1, dist, ratio))
+    return kept
+
+
+def _attach_orphan_phrases(
+    actors: dict[str, TrackBuffer],
+    segments: list[Segment],
+    types: list[MotifType],
+    *,
+    stats: MotifDetectStats,
+    attach_max_dist: float = ORPHAN_ATTACH_MAX_DIST,
+) -> None:
+    """
+    Second pass: attach orphan valley phrases to kept types via subsequence DTW.
+
+    Does not create new types. meanIntraDist stays valley-cluster only (orphans
+    attached by subseq are excluded from the reported mean).
+    """
+    if not types or not segments:
+        return
+    orphans = _orphan_segments(segments, types)
+    if not orphans:
+        return
+
+    occ_counter = 0
+    for t in types:
+        for o in t.occurrences:
+            try:
+                n = int(str(o.id).rsplit("_", 1)[-1])
+                occ_counter = max(occ_counter, n)
+            except ValueError:
+                occ_counter += 1
+
+    attached = 0
+    # Global orphan consumption so one phrase does not join multiple types
+    orphan_used: set[int] = set()
+
+    for mtype in types:
+        ex_occ = _type_exemplar_occurrence(mtype)
+        if ex_occ is None:
+            continue
+        query = query_segment_at_time(
+            actors,
+            ex_occ.actorId,
+            0.5 * (ex_occ.start + ex_occ.end),
+            start=ex_occ.start,
+            end=ex_occ.end,
+        )
+        if query is None:
+            continue
+        hits = _collect_subseq_hits(
+            actors, query, match_max_dist=attach_max_dist
+        )
+        # Restrict to this actor's orphans
+        actor_orphans = [
+            (i, o)
+            for i, o in enumerate(orphans)
+            if o.actor_id == ex_occ.actorId and i not in orphan_used
+        ]
+        if not actor_orphans:
+            continue
+
+        # Candidate (dist, hit, orphan_index) — greedy best-first
+        pairs: list[tuple[float, tuple[float, float, float, float], int]] = []
+        for t0, t1, dist, ratio in hits:
+            if dist > attach_max_dist:
+                continue
+            # NMS against existing type members
+            if any(
+                _interval_iou(t0, t1, o.start, o.end) >= NMS_IOU
+                and o.actorId == ex_occ.actorId
+                for o in mtype.occurrences
+            ):
+                continue
+            for oi, orphan in actor_orphans:
+                if oi in orphan_used:
+                    continue
+                if _hit_near_orphan(t0, t1, orphan):
+                    pairs.append((dist, (t0, t1, dist, ratio), oi))
+
+        pairs.sort(key=lambda p: p[0])
+        hit_used: set[tuple[float, float]] = set()
+        new_occs: list[MotifOccurrence] = []
+        for dist, (t0, t1, _d, ratio), oi in pairs:
+            if oi in orphan_used or (t0, t1) in hit_used:
+                continue
+            # NMS against attaches already chosen for this type
+            if any(
+                _interval_iou(t0, t1, o.start, o.end) >= NMS_IOU
+                for o in list(mtype.occurrences) + new_occs
+            ):
+                continue
+            orphan_used.add(oi)
+            hit_used.add((t0, t1))
+            occ_counter += 1
+            new_occs.append(
+                MotifOccurrence(
+                    id=f"occ_{occ_counter}",
+                    actorId=ex_occ.actorId,
+                    start=float(t0),
+                    end=float(t1),
+                    score=distance_to_match_score(dist),
+                    tempo_ratio=float(ratio),
+                    is_query=False,
+                )
+            )
+        if new_occs:
+            mtype.occurrences = sorted(
+                list(mtype.occurrences) + new_occs, key=lambda o: o.start
+            )
+            attached += len(new_occs)
+
+    stats.orphan_attaches = attached
+
+
 def detect_motif_types(
     actors: dict[str, TrackBuffer],
     *,
@@ -906,6 +1161,7 @@ def detect_motif_types(
     """
     Valley phrases → mirror-aware DTW similarity → clusters.
     Prefer fewer clean types over polluted merges.
+    Orphan phrases may attach to kept types via strong subsequence DTW.
     """
     asp = float(aspect) if aspect and aspect > 0 else DEFAULT_ASPECT
     _set_geom_context(actors, asp)
@@ -916,6 +1172,7 @@ def detect_motif_types(
             setattr(LAST_DETECT_STATS, f, getattr(stats, f))
         return []
     types = _segments_to_motif_types(all_segments, stats=stats)
+    _attach_orphan_phrases(actors, all_segments, types, stats=stats)
     for f in MotifDetectStats.__dataclass_fields__:
         setattr(LAST_DETECT_STATS, f, getattr(stats, f))
     return types
@@ -1234,86 +1491,11 @@ def find_similar_motif(
     if buf is None or len(buf.poses) < 4:
         return None
 
-    poses = buf.poses
-    times_all = np.asarray([p.time for p in poses], dtype=np.float64)
-    track_idxs = np.arange(len(poses), dtype=np.int64)
-    track = _poses_feature_series(
-        poses, track_idxs, actor_id=query.actor_id, mirrored=False
-    )
-    track_m = _poses_feature_series(
-        poses, track_idxs, actor_id=query.actor_id, mirrored=True
-    )
-    if track is None:
-        return None
-    ref_seq, ref_mask, ref_times = track
-
-    q_idxs = np.where((times_all >= query.start) & (times_all <= query.end))[0]
-    if len(q_idxs) < 4:
-        # Fall back to nearest indices spanning the query window
-        i0 = int(np.argmin(np.abs(times_all - query.start)))
-        i1 = int(np.argmin(np.abs(times_all - query.end)))
-        if i1 < i0:
-            i0, i1 = i1, i0
-        q_idxs = np.arange(i0, max(i0 + 1, i1 + 1), dtype=np.int64)
-    q_pack = _poses_feature_series(
-        poses, q_idxs, actor_id=query.actor_id, mirrored=False
-    )
-    if q_pack is None:
-        return None
-    q_seq, q_mask, _q_times = q_pack
-    query_dur = max(float(query.end - query.start), 1e-3)
-
-    # Same-side + mirrored reference (query stays unmirrored; mirror the track)
-    candidates: list[tuple[float, float, float]] = []
-    for ref_s, ref_mk in (
-        (ref_seq, ref_mask),
-        (track_m[0], track_m[1]) if track_m is not None else (None, None),
-    ):
-        if ref_s is None or ref_mk is None:
-            continue
-        end_cost, start_idx = _subsequence_end_costs(q_seq, q_mask, ref_s, ref_mk)
-        candidates.extend(
-            _local_minima_hits(
-                end_cost,
-                start_idx,
-                ref_times,
-                match_max_dist=match_max_dist,
-                query_start=query.start,
-                query_end=query.end,
-                query_dur=query_dur,
-            )
-        )
-
-    # Dedup near-identical (start,end), keep best distance
-    candidates.sort(key=lambda h: h[2])
-    filtered: list[tuple[float, float, float, float]] = []  # start, end, dist, ratio
-    for t0, t1, dist in candidates:
-        ratio = _tempo_ratio(t1 - t0, query_dur)
-        if not _tempo_in_bounds(ratio):
-            continue
-        # Skip heavy overlap with the query seed
-        inter = max(0.0, min(query.end, t1) - max(query.start, t0))
-        union = max(query.end, t1) - min(query.start, t0)
-        if union > 0 and inter / union >= NMS_IOU:
-            continue
-        filtered.append((t0, t1, dist, ratio))
-
-    # NMS among hits (best distance first)
-    kept: list[tuple[float, float, float, float]] = []
-    for t0, t1, dist, ratio in sorted(filtered, key=lambda h: h[2]):
-        drop = False
-        for k0, k1, _kd, _kr in kept:
-            inter = max(0.0, min(k1, t1) - max(k0, t0))
-            union = max(k1, t1) - min(k0, t0)
-            if union > 0 and inter / union >= NMS_IOU:
-                drop = True
-                break
-        if not drop:
-            kept.append((t0, t1, dist, ratio))
+    kept_all = _collect_subseq_hits(actors, query, match_max_dist=match_max_dist)
 
     # Tiered retention: all strong matches + a few best soft ones (time-diverse)
-    strong = [h for h in kept if h[2] <= SUBSEQ_STRONG_DIST]
-    soft = [h for h in kept if h[2] > SUBSEQ_STRONG_DIST]
+    strong = [h for h in kept_all if h[2] <= SUBSEQ_STRONG_DIST]
+    soft = [h for h in kept_all if h[2] > SUBSEQ_STRONG_DIST]
     soft_kept: list[tuple[float, float, float, float]] = []
     for h in sorted(soft, key=lambda x: x[2]):
         mid = 0.5 * (h[0] + h[1])

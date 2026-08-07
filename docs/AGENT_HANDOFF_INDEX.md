@@ -4,6 +4,7 @@ Design agent maintains this list. Programming agent: work **top to bottom** unle
 
 | Status | Topic | Handoff | Notes |
 |--------|--------|---------|--------|
+| done | **P1** Motif orphan attach | [AGENT_HANDOFF_MOTIF_ORPHAN_ATTACH.md](./AGENT_HANDOFF_MOTIF_ORPHAN_ATTACH.md) | Strong subseq attach of orphans to kept types; cluster 0.24 untouched |
 | done | **P1** Always-visible time readout | [AGENT_HANDOFF_TIME_READOUT.md](./AGENT_HANDOFF_TIME_READOUT.md) | `0:08.42 / 0:16.20` left of slider; clock before chart throttle |
 | done | **P0** Floor map live during play | [AGENT_HANDOFF_FLOOR_LIVE.md](./AGENT_HANDOFF_FLOOR_LIVE.md) | Floor dot throttled ~10 Hz while playing; no freeze-until-pause |
 | done | **P0** Motif over-merge | [AGENT_HANDOFF_MOTIF_OVERMERGE.md](./AGENT_HANDOFF_MOTIF_OVERMERGE.md) | complete @ 0.24/0.26; no mega-type; precision > recall |
@@ -25,6 +26,10 @@ Design agent maintains this list. Programming agent: work **top to bottom** unle
 | done | English UI | [AGENT_HANDOFF_UI_ENGLISH_AND_TIMELINE.md](./AGENT_HANDOFF_UI_ENGLISH_AND_TIMELINE.md) | EN strings shipped |
 
 Legacy: [AGENT_HANDOFF.md](./AGENT_HANDOFF.md) (Python desktop pivot — superseded).
+
+**Quick reference:** [CHEATSHEET_METRICS_MOTIFS.md](./CHEATSHEET_METRICS_MOTIFS.md) (EN) · [CHEATSHEET_METRICS_MOTIFS_YUE.md](./CHEATSHEET_METRICS_MOTIFS_YUE.md) (粵)
+
+**Analysis agent:** [ANALYSIS_AGENT_GUIDE.md](./ANALYSIS_AGENT_GUIDE.md) · rule `.cursor/rules/analysis-agent.mdc` · outputs in `docs/analysis/`
 
 **Status values:** `pending` · `in progress` · `done` · `partial` · `cancelled` · `answered`
 

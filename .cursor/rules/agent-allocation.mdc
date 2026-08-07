@@ -5,17 +5,19 @@ alwaysApply: true
 
 # Agent allocation
 
-This repo uses **two roles**. Pick the role that matches this chat (user will say, or enable the matching rule).
+This repo uses **three roles**. Pick the role that matches this chat (user will say, or enable the matching rule).
 
 | Role | This chat | Output |
 |------|-----------|--------|
 | **Design agent** | Product, UX, metrics meaning, priorities, trade-offs | Decisions + **work orders** in `docs/AGENT_HANDOFF_*.md` |
 | **Programming agent** | Implement, test, fix CI, commit code | Code + `docs/IMPLEMENTATION_NOTES_*.md` when done |
+| **Analysis agent** | Read / compare `.dance.json`, dance-data insights | Summaries, contrast tables, optional `docs/analysis/COMPARE_*.md` |
 
-**Handoff is the contract.** Design agent does not need to implement large features here; programming agent implements from handoffs.
+**Handoff is the contract** between design and programming. Analysis does **not** retune the pipeline; if metrics/motifs look wrong, file a design handoff.
 
 - Backlog index: `docs/AGENT_HANDOFF_INDEX.md` (design maintains; programming executes in order unless user reprioritizes)
+- Analysis how-to: `docs/ANALYSIS_AGENT_GUIDE.md`
 - Architecture baseline: `docs/IMPLEMENTATION_PLAN.md`
-- User writes in English; UI copy default **English** (see latest handoffs)
+- User writes in English; UI copy default **English** (see latest handoffs); analysis chat default **Cantonese**
 
 Do not edit `.cursor/plans/*.plan.md` unless the user asks.
