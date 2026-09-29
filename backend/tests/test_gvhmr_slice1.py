@@ -1,4 +1,5 @@
 import os
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -190,3 +191,16 @@ class TestGvhmrRunner(unittest.TestCase):
                     with self.assertRaises(GvhmrNotConfigured) as ctx:
                         run_gvhmr_export(Path(tmp) / "clip.mp4")
         self.assertIn("GVHMR JSON invalid", str(ctx.exception))
+
+
+class TestExportScriptExists(unittest.TestCase):
+    def test_help_mentions_out(self) -> None:
+        script = Path(__file__).resolve().parents[1] / "tools" / "gvhmr_export.py"
+        proc = subprocess.run(
+            [sys.executable, str(script), "--help"],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        self.assertEqual(proc.returncode, 0)
+        self.assertIn("--out", proc.stdout)
