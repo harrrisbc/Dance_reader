@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import subprocess
 import tempfile
@@ -53,7 +54,8 @@ def run_gvhmr_export(video: Path, *, max_people: int = 2) -> tuple[list[list[Pos
         if proc.returncode != 0 or not out.is_file():
             tail = "\n".join(proc.stderr.splitlines()[-20:])
             raise GvhmrNotConfigured(tail or f"GVHMR exited {proc.returncode}")
-        import json
-
-        data = json.loads(out.read_text(encoding="utf-8"))
-    return parse_gvhmr_document(data)
+        try:
+            data = json.loads(out.read_text(encoding="utf-8"))
+            return parse_gvhmr_document(data)
+        except (json.JSONDecodeError, ValueError) as exc:
+            raise GvhmrNotConfigured(f"GVHMR JSON invalid: {exc}") from exc

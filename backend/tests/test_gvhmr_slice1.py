@@ -160,3 +160,33 @@ class TestGvhmrRunner(unittest.TestCase):
                     with self.assertRaises(GvhmrNotConfigured) as ctx:
                         run_gvhmr_export(Path(tmp) / "clip.mp4")
         self.assertIn("boom-from-gvhmr", str(ctx.exception))
+
+    def test_invalid_json_raises_gvhmr_not_configured(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "gvhmr"
+            weight = root / "inputs" / "checkpoints" / "yolo" / "yolov8x.pt"
+            weight.parent.mkdir(parents=True)
+            weight.write_bytes(b"x")
+            script = Path(tmp) / "bad_json.py"
+            script.write_text(
+                "import sys\n"
+                "out = None\n"
+                "args = sys.argv[1:]\n"
+                "for i, a in enumerate(args):\n"
+                "    if a == '--out' and i + 1 < len(args):\n"
+                "        out = args[i + 1]\n"
+                "        break\n"
+                "if out:\n"
+                "    open(out, 'w', encoding='utf-8').write('not-json')\n"
+                "sys.exit(0)\n",
+                encoding="utf-8",
+            )
+            env = {
+                "DANCE_GVHMR_PYTHON": sys.executable,
+                "DANCE_GVHMR_ROOT": str(root),
+            }
+            with mock.patch.dict(os.environ, env, clear=True):
+                with mock.patch("app.pipeline.gvhmr_run._EXPORT_SCRIPT", script):
+                    with self.assertRaises(GvhmrNotConfigured) as ctx:
+                        run_gvhmr_export(Path(tmp) / "clip.mp4")
+        self.assertIn("GVHMR JSON invalid", str(ctx.exception))
