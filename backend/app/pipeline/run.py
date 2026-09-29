@@ -149,7 +149,7 @@ def run_pipeline(
     stride: int = DEFAULT_STRIDE,
     model_name: str = DEFAULT_MODEL,
     max_people: int = DEFAULT_MAX_PEOPLE,
-    write_overlay_video: bool = True,
+    write_overlay_video: bool = False,
 ) -> None:
     def progress(p: float, msg: str) -> None:
         store.update(job_id, status="running", progress=p, message=msg)
@@ -166,11 +166,14 @@ def run_pipeline(
             job_id=job_id,
             progress_cb=progress,
         )
+        done_msg = "Analysis complete"
+        if write_overlay_video:
+            done_msg = "Analysis complete. Overlay video is not produced in this version."
         store.update(
             job_id,
             status="done",
             progress=1.0,
-            message="Analysis complete",
+            message=done_msg,
             result=result,
             overlay_path=overlay_path,
         )

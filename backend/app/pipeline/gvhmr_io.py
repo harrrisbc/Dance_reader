@@ -6,14 +6,22 @@ from app.schemas import PoseFrame
 
 
 def _as_pose(frame: dict) -> PoseFrame:
+    if not isinstance(frame, dict):
+        raise ValueError("frame must be an object")
     joints = frame.get("joints3d") or []
     kpts = frame.get("keypoints") or []
     if len(joints) != 24 or any(len(j) != 3 for j in joints):
         raise ValueError("joints3d must be 24x3")
     if len(kpts) != 24 or any(len(k) != 3 for k in kpts):
         raise ValueError("keypoints must be 24x3")
+    if "time" not in frame:
+        raise ValueError("frame missing time")
+    try:
+        t = float(frame["time"])
+    except (TypeError, ValueError) as exc:
+        raise ValueError("frame time must be a number") from exc
     return PoseFrame(
-        time=float(frame["time"]),
+        time=t,
         joints3d=[[float(v) for v in j] for j in joints],
         keypoints=[[float(v) for v in k] for k in kpts],
     )

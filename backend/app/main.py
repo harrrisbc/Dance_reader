@@ -166,7 +166,7 @@ async def analyze(
     file: UploadFile | None = File(default=None),
     stride: int = Form(default=1),
     model: str = Form(default="yolo11s-pose.pt"),
-    write_overlay: bool = Form(default=True),
+    write_overlay: bool = Form(default=False),
 ) -> JobStatus:
     """Upload a video and start analysis job."""
     if file is None:

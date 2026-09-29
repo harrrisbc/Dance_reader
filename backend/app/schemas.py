@@ -93,7 +93,7 @@ class AnalyzePathBody(BaseModel):
     path: str
     stride: int = 1
     model: str = "yolo11s-pose.pt"
-    write_overlay: bool = True
+    write_overlay: bool = False
 
 
 def analysis_to_dict(result: AnalysisResult) -> dict[str, Any]:

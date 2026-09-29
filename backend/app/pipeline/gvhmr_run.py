@@ -57,5 +57,5 @@ def run_gvhmr_export(video: Path, *, max_people: int = 2) -> tuple[list[list[Pos
         try:
             data = json.loads(out.read_text(encoding="utf-8"))
             return parse_gvhmr_document(data)
-        except (json.JSONDecodeError, ValueError) as exc:
+        except (json.JSONDecodeError, ValueError, KeyError, TypeError, AttributeError) as exc:
             raise GvhmrNotConfigured(f"GVHMR JSON invalid: {exc}") from exc
