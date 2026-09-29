@@ -6,6 +6,7 @@ import numpy as np
 from scipy.signal import savgol_filter
 
 from app.pipeline.pose_track import TrackBuffer, TrackedPose
+from app.pipeline.smpl_skeleton import smpl_keypoints_to_coco17
 from app.schemas import AnalysisResult, MetricPoint, PoseFrame
 
 # COCO indices used for limb speed / energy / pose features
@@ -549,6 +550,8 @@ def _actor_to_buffer(actor_id: str, poses: list[PoseFrame]) -> TrackBuffer:
             continue
         if kpts.shape[1] > 3:
             kpts = kpts[:, :3]
+        if kpts.shape[0] == 24:
+            kpts = np.asarray(smpl_keypoints_to_coco17(kpts.tolist()), dtype=np.float32)
         buf.poses.append(
             TrackedPose(
                 time=float(pf.time),

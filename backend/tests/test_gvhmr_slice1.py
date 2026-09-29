@@ -1,9 +1,12 @@
 import unittest
 
+import numpy as np
+
 from app.pipeline.gvhmr_io import parse_gvhmr_document
+from app.pipeline.metrics import enrich_metrics
 from app.pipeline.pose_track import COCO_EDGES
 from app.pipeline.smpl_skeleton import SMPL_PARENTS, skeleton_edges, smpl_keypoints_to_coco17
-from app.schemas import AnalysisResult
+from app.schemas import Actor, AnalysisResult, PoseFrame
 
 
 class TestSkeletonEdges(unittest.TestCase):
@@ -95,3 +98,28 @@ class TestParseGvhmr(unittest.TestCase):
         self.assertEqual(result.poseBackend, "yolo")
         self.assertIsNone(result.actors[0].poses[0].joints3d)
         self.assertFalse(result.staticCamera)
+
+
+class TestEnrichKeepsSmplKeypoints(unittest.TestCase):
+    def test_metrics_compute_but_stored_pose_stays_24(self) -> None:
+        kpts = [[0.5, 0.5, 1.0] for _ in range(24)]
+        # Give the head and ankles distinct image positions so level/reach are finite.
+        kpts[15] = [0.5, 0.2, 1.0]
+        kpts[7] = [0.45, 0.9, 1.0]
+        kpts[8] = [0.55, 0.9, 1.0]
+        poses = [
+            PoseFrame(time=0.0, keypoints=kpts, joints3d=[[0.0, 0.0, 0.0] for _ in range(24)]),
+            PoseFrame(time=0.1, keypoints=kpts, joints3d=[[0.0, 0.0, 0.0] for _ in range(24)]),
+        ]
+        result = AnalysisResult(
+            duration=0.1,
+            fps=10.0,
+            frame_width=100,
+            frame_height=100,
+            poseBackend="gvhmr",
+            actors=[Actor(id="track_0", label="Dancer 1", poses=poses)],
+        )
+        enrich_metrics(result)
+        self.assertEqual(len(result.actors[0].poses[0].keypoints), 24)
+        self.assertGreaterEqual(len(result.actors[0].metrics), 1)
+        self.assertTrue(np.isfinite(result.actors[0].metrics[0].energy))
