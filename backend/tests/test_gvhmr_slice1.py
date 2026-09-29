@@ -3,7 +3,7 @@ import unittest
 import numpy as np
 
 from app.pipeline.gvhmr_io import parse_gvhmr_document
-from app.pipeline.metrics import enrich_metrics
+from app.pipeline.metrics import _actor_to_buffer, enrich_metrics
 from app.pipeline.pose_track import COCO_EDGES
 from app.pipeline.smpl_skeleton import SMPL_PARENTS, skeleton_edges, smpl_keypoints_to_coco17
 from app.schemas import Actor, AnalysisResult, PoseFrame
@@ -120,6 +120,8 @@ class TestEnrichKeepsSmplKeypoints(unittest.TestCase):
             actors=[Actor(id="track_0", label="Dancer 1", poses=poses)],
         )
         enrich_metrics(result)
+        buf = _actor_to_buffer(result.actors[0].id, result.actors[0].poses)
+        self.assertEqual(buf.poses[0].keypoints.shape[0], 17)
         self.assertEqual(len(result.actors[0].poses[0].keypoints), 24)
         self.assertGreaterEqual(len(result.actors[0].metrics), 1)
         self.assertTrue(np.isfinite(result.actors[0].metrics[0].energy))
