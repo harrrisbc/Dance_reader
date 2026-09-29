@@ -20,6 +20,7 @@ class MetricPoint(BaseModel):
 class PoseFrame(BaseModel):
     time: float
     keypoints: list[list[float]]  # [[x, y, conf], ...] normalized 0–1
+    joints3d: list[list[float]] | None = None  # SMPL-24 meters, gvhmr_world; None on old files
 
 
 class Actor(BaseModel):
@@ -68,6 +69,10 @@ class AnalysisResult(BaseModel):
     manualMarks: list[ManualMark] = Field(default_factory=list)
     # Last detect summary, e.g. "18 phrases · 4 clusters · 0 passed similarity 0.60"
     motifDiag: str | None = None
+    poseBackend: str = "yolo"
+    coordFrame: str = ""
+    staticCamera: bool = False
+    ignoredTracks: int = 0
 
 
 class JobStatus(BaseModel):

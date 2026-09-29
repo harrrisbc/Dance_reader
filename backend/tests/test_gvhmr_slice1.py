@@ -1,7 +1,9 @@
 import unittest
 
+from app.pipeline.gvhmr_io import parse_gvhmr_document
 from app.pipeline.pose_track import COCO_EDGES
 from app.pipeline.smpl_skeleton import SMPL_PARENTS, skeleton_edges, smpl_keypoints_to_coco17
+from app.schemas import AnalysisResult
 
 
 class TestSkeletonEdges(unittest.TestCase):
@@ -37,3 +39,59 @@ class TestCocoBridge(unittest.TestCase):
     def test_rejects_wrong_length(self) -> None:
         with self.assertRaises(ValueError):
             smpl_keypoints_to_coco17([[0.0, 0.0, 1.0]])
+
+
+def _frame(t: float, n: int = 24) -> dict:
+    return {
+        "time": t,
+        "joints3d": [[0.1, 0.2, 0.3] for _ in range(n)],
+        "keypoints": [[0.4, 0.5, 1.0] for _ in range(n)],
+    }
+
+
+class TestParseGvhmr(unittest.TestCase):
+    def test_sorts_longest_then_earlier_and_keeps_gap(self) -> None:
+        doc = {
+            "staticCamera": True,
+            "coordFrame": "gvhmr_world",
+            "ignoredTracks": 1,
+            "tracks": [
+                {"frames": [_frame(1.0), _frame(1.1)]},
+                {"frames": [_frame(0.0), _frame(0.5), _frame(1.0)]},
+            ],
+        }
+        tracks, ignored = parse_gvhmr_document(doc)
+        self.assertEqual(ignored, 1)
+        self.assertEqual(len(tracks), 2)
+        self.assertEqual([p.time for p in tracks[0]], [0.0, 0.5, 1.0])
+        self.assertEqual(len(tracks[0][0].joints3d), 24)
+        self.assertEqual(len(tracks[0][0].keypoints), 24)
+        self.assertNotIn(0.25, [p.time for p in tracks[0]])
+
+    def test_tie_uses_earlier_first_sample(self) -> None:
+        doc = {
+            "ignoredTracks": 0,
+            "tracks": [
+                {"frames": [_frame(2.0), _frame(3.0)]},
+                {"frames": [_frame(0.5), _frame(1.5)]},
+            ],
+        }
+        tracks, _ = parse_gvhmr_document(doc)
+        self.assertEqual(tracks[0][0].time, 0.5)
+
+    def test_rejects_short_joints(self) -> None:
+        doc = {"ignoredTracks": 0, "tracks": [{"frames": [_frame(0.0, n=3)]}]}
+        with self.assertRaises(ValueError):
+            parse_gvhmr_document(doc)
+
+    def test_old_analysis_json_still_loads(self) -> None:
+        old = {
+            "version": 1,
+            "duration": 1.0,
+            "fps": 30.0,
+            "actors": [{"id": "track_0", "label": "Dancer 1", "poses": [{"time": 0.0, "keypoints": [[0, 0, 1]]}]}],
+        }
+        result = AnalysisResult.model_validate(old)
+        self.assertEqual(result.poseBackend, "yolo")
+        self.assertIsNone(result.actors[0].poses[0].joints3d)
+        self.assertFalse(result.staticCamera)
