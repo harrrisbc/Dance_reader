@@ -6,12 +6,14 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
+import cv2
 import numpy as np
 
 from app.pipeline.gvhmr_io import parse_gvhmr_document
 from app.pipeline.gvhmr_run import GvhmrNotConfigured, run_gvhmr_export
 from app.pipeline.metrics import _actor_to_buffer, enrich_metrics
 from app.pipeline.pose_track import COCO_EDGES
+from app.pipeline.run import analyze_video
 from app.pipeline.smpl_skeleton import SMPL_PARENTS, skeleton_edges, smpl_keypoints_to_coco17
 from app.schemas import Actor, AnalysisResult, PoseFrame
 
@@ -204,3 +206,59 @@ class TestExportScriptExists(unittest.TestCase):
         )
         self.assertEqual(proc.returncode, 0)
         self.assertIn("--out", proc.stdout)
+
+
+class _Cap:
+    def isOpened(self):
+        return True
+
+    def get(self, prop):
+        return {
+            cv2.CAP_PROP_FPS: 10.0,
+            cv2.CAP_PROP_FRAME_COUNT: 2.0,
+            cv2.CAP_PROP_FRAME_WIDTH: 100.0,
+            cv2.CAP_PROP_FRAME_HEIGHT: 100.0,
+        }[prop]
+
+    def release(self):
+        return None
+
+
+class TestAnalyzeUsesGvhmr(unittest.TestCase):
+    def test_analyze_stores_smpl_and_does_not_call_yolo(self) -> None:
+        poses = [
+            PoseFrame(
+                time=0.0,
+                keypoints=[[0.5, 0.5, 1.0] for _ in range(24)],
+                joints3d=[[0.0, 1.0, 0.0] for _ in range(24)],
+            ),
+            PoseFrame(
+                time=0.1,
+                keypoints=[[0.5, 0.5, 1.0] for _ in range(24)],
+                joints3d=[[0.0, 1.0, 0.0] for _ in range(24)],
+            ),
+        ]
+        messages: list[str] = []
+
+        def fake_export(video, *, max_people=2):
+            return [poses, poses], 3
+
+        with mock.patch("cv2.VideoCapture", return_value=_Cap()):
+            with mock.patch("app.pipeline.run.run_gvhmr_export", fake_export):
+                with mock.patch("app.pipeline.run.load_model") as load_model:
+                    with mock.patch("app.pipeline.run.track_video") as track_video:
+                        result, _overlay, buffers = analyze_video(
+                            Path("unused.mp4"),
+                            progress_cb=lambda _p, msg: messages.append(msg),
+                        )
+        load_model.assert_not_called()
+        track_video.assert_not_called()
+        self.assertEqual(result.poseBackend, "gvhmr")
+        self.assertEqual(result.coordFrame, "gvhmr_world")
+        self.assertTrue(result.staticCamera)
+        self.assertEqual(result.ignoredTracks, 3)
+        self.assertEqual(len(result.actors[0].poses[0].keypoints), 24)
+        self.assertIn("Running GVHMR…", messages)
+        # Motif buffers are the bridge, not the stored 24.
+        first = next(iter(buffers.values()))
+        self.assertEqual(first.poses[0].keypoints.shape[0], 17)

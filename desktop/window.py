@@ -197,6 +197,9 @@ class MainWindow(QMainWindow):
             "M is slower but often better when fans or side views hide joints. "
             "Does not replace re-opening projects after the torso-scale fix."
         )
+        self.model_label = QLabel("Model")
+        self.model_combo.hide()
+        self.model_label.hide()
         self._last_pose_model = DEFAULT_MODEL
 
         self.slider = QSlider(Qt.Orientation.Horizontal)
@@ -304,7 +307,7 @@ class MainWindow(QMainWindow):
         top.addWidget(self.skel_style)
         top.addWidget(QLabel("Max dancers"))
         top.addWidget(self.max_people_spin)
-        top.addWidget(QLabel("Model"))
+        top.addWidget(self.model_label)
         top.addWidget(self.model_combo)
         top.addWidget(rename_btn)
         top.addStretch(1)
@@ -536,7 +539,7 @@ class MainWindow(QMainWindow):
         n = int(self.max_people_spin.value())
         model_name = self.selected_pose_model()
         self._last_pose_model = model_name
-        self.status.setText(f"Analyzing… (max {n} dancers, {model_name})")
+        self.status.setText("Running GVHMR…")
         self.worker = AnalyzeWorker(
             self.video_path, max_people=n, model_name=model_name
         )
@@ -558,13 +561,18 @@ class MainWindow(QMainWindow):
         n_types = len(result.motifTypes)
         diag = result.motifDiag or LAST_DETECT_STATS.summary()
         model_bit = Path(self._last_pose_model).stem
-        if n_types == 0:
-            self.status.setText(f"Done: no motif types ({model_bit}) — {diag}")
+        if not result.actors:
+            status = "No person was tracked."
+        elif n_types == 0:
+            status = f"Done: no motif types ({model_bit}) — {diag}"
         else:
-            self.status.setText(
+            status = (
                 f"Done: {len(result.actors)} dancers, {n_types} motif types "
                 f"({model_bit}) — unsaved — {diag}"
             )
+        if result.ignoredTracks > 0:
+            status += f" · ignored {result.ignoredTracks} extra tracks"
+        self.status.setText(status)
         self.sync_overlay()
         self.decode.request("seek", int(self.slider.value()))
 

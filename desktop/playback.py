@@ -13,7 +13,7 @@ import numpy as np
 from PySide6.QtCore import QThread, Signal
 from PySide6.QtGui import QImage
 
-from app.pipeline.pose_track import COCO_EDGES
+from app.pipeline.smpl_skeleton import skeleton_edges
 
 PREVIEW_MAX_W = 960
 MAX_SEQUENTIAL_READS = 8
@@ -255,7 +255,7 @@ class VideoDecodeWorker(QThread):
 
         if self._skel_style == "skeleton":
             layer = out.copy()
-            for a, b in COCO_EDGES:
+            for a, b in skeleton_edges(len(pts)):
                 if a < len(pts) and b < len(pts) and pts[a] and pts[b]:
                     cv2.line(layer, pts[a], pts[b], color, 2, lineType=cv2.LINE_AA)
             cv2.addWeighted(layer, 0.65, out, 0.35, 0, out)

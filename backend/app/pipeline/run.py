@@ -3,17 +3,21 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import cv2
+import numpy as np
+
 from app.jobs import JobStore
-from app.pipeline.annotate import write_overlay
-from app.pipeline.metrics import compute_metrics, enrich_metrics, frame_aspect
+from app.pipeline.gvhmr_run import run_gvhmr_export
+from app.pipeline.metrics import _actor_to_buffer, compute_metrics, enrich_metrics, frame_aspect
 from app.pipeline.motifs import LAST_DETECT_STATS, detect_motif_types
 from app.pipeline.pose_track import (
     DEFAULT_MAX_PEOPLE,
     DEFAULT_MODEL,
     DEFAULT_STRIDE,
     TrackBuffer,
-    load_model,
-    track_video,
+    TrackedPose,
+    load_model,  # kept so tests can assert the YOLO path is not called
+    track_video,  # kept so tests can assert the YOLO path is not called
 )
 from app.schemas import Actor, AnalysisResult, PoseFrame
 
@@ -22,40 +26,50 @@ def _actor_label(index: int) -> str:
     return f"Dancer {index}"
 
 
-def _buffers_to_actors(
-    buffers: dict[int, TrackBuffer],
+def _gvhmr_tracks_to_actors(
+    tracks: list[list[PoseFrame]],
     *,
     aspect: float,
-) -> tuple[list[Actor], dict[str, TrackBuffer]]:
-    # Stable order by track id; drop very short tracks
-    sorted_ids = sorted(buffers.keys())
+) -> tuple[list[Actor], dict[str, TrackBuffer], dict[int, TrackBuffer]]:
+    """Store SMPL-24 poses. Motif buffers are the COCO-17 bridge."""
     actors: list[Actor] = []
     keyed: dict[str, TrackBuffer] = {}
+    buffers: dict[int, TrackBuffer] = {}
     idx = 1
-    for tid in sorted_ids:
-        buf = buffers[tid]
-        if len(buf.poses) < 4:
+    for tid, track_poses in enumerate(tracks):
+        if not track_poses:
             continue
+        raw = TrackBuffer(track_id=tid)
+        for pf in track_poses:
+            raw.poses.append(
+                TrackedPose(
+                    time=float(pf.time),
+                    track_id=tid,
+                    keypoints=np.asarray(pf.keypoints, dtype=np.float32),
+                    xyxy=np.zeros(4, dtype=np.float32),
+                )
+            )
         actor_id = f"track_{tid}"
-        poses = [
+        bridged = [
             PoseFrame(
                 time=p.time,
                 keypoints=[[float(x), float(y), float(c)] for x, y, c in p.keypoints.tolist()],
             )
-            for p in buf.poses
+            for p in raw.poses
         ]
-        metrics = compute_metrics(buf, aspect=aspect)
-        actors.append(
-            Actor(
-                id=actor_id,
-                label=_actor_label(idx),
-                metrics=metrics,
-                poses=poses,
-            )
+        coco = _actor_to_buffer(actor_id, bridged)
+        actor = Actor(
+            id=actor_id,
+            label=_actor_label(idx),
+            metrics=compute_metrics(coco, aspect=aspect),
+            poses=bridged,
         )
-        keyed[actor_id] = buf
+        actor.poses = list(track_poses)
+        actors.append(actor)
+        keyed[actor_id] = coco
+        buffers[tid] = coco
         idx += 1
-    return actors, keyed
+    return actors, keyed, buffers
 
 
 def analyze_video(
@@ -75,21 +89,22 @@ def analyze_video(
         if progress_cb:
             progress_cb(p, msg)
 
-    progress(0.02, "Loading model")
-    model = load_model(model_name)
+    progress(0.1, "Running GVHMR…")
+    tracks, ignored = run_gvhmr_export(video_path, max_people=min(max_people, 2))
 
-    progress(0.05, "Tracking poses")
-    buffers, duration, fps, frame_w, frame_h = track_video(
-        str(video_path),
-        model,
-        stride=stride,
-        max_people=max_people,
-        progress_cb=progress,
-    )
+    cap = cv2.VideoCapture(str(video_path))
+    try:
+        fps = float(cap.get(cv2.CAP_PROP_FPS))
+        frame_count = float(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+        frame_w = float(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+        frame_h = float(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+    finally:
+        cap.release()
+    duration = frame_count / fps if fps > 0 else 0.0
 
     progress(0.65, "Computing energy / speed / space metrics")
     aspect = frame_aspect(int(frame_w), int(frame_h))
-    actors, keyed = _buffers_to_actors(buffers, aspect=aspect)
+    actors, keyed, buffers = _gvhmr_tracks_to_actors(tracks, aspect=aspect)
 
     progress(0.72, "Detecting motif types")
     motif_types = detect_motif_types(keyed, aspect=aspect)
@@ -105,6 +120,10 @@ def analyze_video(
         motifTypes=motif_types,
         manualMarks=[],
         motifDiag=motif_diag,
+        poseBackend="gvhmr",
+        coordFrame="gvhmr_world",
+        staticCamera=True,
+        ignoredTracks=int(ignored),
     )
     enrich_metrics(result)
 
@@ -116,21 +135,6 @@ def analyze_video(
             json.dumps(result.model_dump(), ensure_ascii=False, indent=2),
             encoding="utf-8",
         )
-
-    if write_overlay_video and actors and artifacts_dir is not None and job_id is not None:
-        progress(0.85, "Writing preview video")
-        overlay_path = artifacts_dir / job_id / "overlay.mp4"
-        try:
-            write_overlay(
-                str(video_path),
-                overlay_path,
-                buffers,
-                model,
-                stride=max(stride, 1),
-                progress_cb=progress,
-            )
-        except Exception:
-            overlay_path = None
 
     progress(1.0, "Analysis complete")
     return result, overlay_path, buffers
@@ -151,7 +155,7 @@ def run_pipeline(
         store.update(job_id, status="running", progress=p, message=msg)
 
     try:
-        store.update(job_id, status="running", progress=0.02, message="Loading model")
+        store.update(job_id, status="running", progress=0.02, message="Running GVHMR…")
         result, overlay_path, _buffers = analyze_video(
             video_path,
             stride=stride,
