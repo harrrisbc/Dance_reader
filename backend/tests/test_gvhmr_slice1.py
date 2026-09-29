@@ -1,8 +1,14 @@
+import os
+import sys
+import tempfile
 import unittest
+from pathlib import Path
+from unittest import mock
 
 import numpy as np
 
 from app.pipeline.gvhmr_io import parse_gvhmr_document
+from app.pipeline.gvhmr_run import GvhmrNotConfigured, run_gvhmr_export
 from app.pipeline.metrics import _actor_to_buffer, enrich_metrics
 from app.pipeline.pose_track import COCO_EDGES
 from app.pipeline.smpl_skeleton import SMPL_PARENTS, skeleton_edges, smpl_keypoints_to_coco17
@@ -125,3 +131,32 @@ class TestEnrichKeepsSmplKeypoints(unittest.TestCase):
         self.assertEqual(len(result.actors[0].poses[0].keypoints), 24)
         self.assertGreaterEqual(len(result.actors[0].metrics), 1)
         self.assertTrue(np.isfinite(result.actors[0].metrics[0].energy))
+
+
+class TestGvhmrRunner(unittest.TestCase):
+    def test_missing_python_names_the_env_var(self) -> None:
+        with mock.patch.dict(os.environ, {}, clear=True):
+            with self.assertRaises(GvhmrNotConfigured) as ctx:
+                run_gvhmr_export(Path("clip.mp4"))
+        self.assertIn("DANCE_GVHMR_PYTHON", str(ctx.exception))
+
+    def test_nonzero_exit_includes_stderr_tail(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "gvhmr"
+            weight = root / "inputs" / "checkpoints" / "yolo" / "yolov8x.pt"
+            weight.parent.mkdir(parents=True)
+            weight.write_bytes(b"x")
+            script = Path(tmp) / "fail.py"
+            script.write_text(
+                "import sys\nsys.stderr.write('boom-from-gvhmr\\n')\nsys.exit(2)\n",
+                encoding="utf-8",
+            )
+            env = {
+                "DANCE_GVHMR_PYTHON": sys.executable,
+                "DANCE_GVHMR_ROOT": str(root),
+            }
+            with mock.patch.dict(os.environ, env, clear=True):
+                with mock.patch("app.pipeline.gvhmr_run._EXPORT_SCRIPT", script):
+                    with self.assertRaises(GvhmrNotConfigured) as ctx:
+                        run_gvhmr_export(Path(tmp) / "clip.mp4")
+        self.assertIn("boom-from-gvhmr", str(ctx.exception))
