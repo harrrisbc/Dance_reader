@@ -7,6 +7,7 @@
 - **Mesh cache** (`*.dance.mesh.npz`) with `verts_world`, `verts_incam`, `faces`, per-track `times` / `mask`; optional baked overlay mp4 beside the cache.
 - **Desktop playback**: `VideoDecodeWorker` composes mesh (overlay video or projected edge fallback) before wire skeleton; **Mesh overlay** checkbox.
 - **Desktop layout**: horizontal splitter — video (left) and `MeshWorldView` (right); **3D viewer** checkbox shows/hides the right pane.
+- **3D viewer UX**: ground plane/grid under the mesh; camera framed once to the full-sequence AABB (in-place point updates — no per-frame zoom); **Up axis** combo (`Y up (GVHMR)` / `Z up`).
 - **Bake-on-demand**: on project load / after Analyze, if a sidecar exists and mesh cache is missing or invalid, a background thread runs the bake, updates `meshCache` / `meshCacheSha256`, persists beside the project when saved, and pushes `set_mesh_layer` + viewer data. Status shows `Building mesh cache…` (not overwritten by “Loaded project” while baking); on success restores the prior Done/Loaded message or `Mesh cache ready`; on failure shows `Mesh bake: …`. Re-analyze or open another project cancels stale bake workers (generation + sidecar guards). Wire/skeleton playback is unchanged on bake failure.
 - **Legacy projects** without a sidecar: mesh and 3D viewer checkboxes disabled; tooltip `Re-analyze to enable mesh`.
 

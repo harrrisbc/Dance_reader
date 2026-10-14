@@ -304,3 +304,16 @@ class TestPersistSidecar(unittest.TestCase):
             rel = persist_sidecar_with_project(dance, src, sha256_file(src))
             self.assertEqual(rel, "proj.dance.smpl.npz")
             self.assertTrue((dance.parent / rel).is_file())
+
+
+class TestMeshViewUpAxis(unittest.TestCase):
+    def test_y_up_identity_z_up_swaps(self) -> None:
+        root = Path(__file__).resolve().parents[2]
+        if str(root) not in sys.path:
+            sys.path.insert(0, str(root))
+        from desktop.mesh_view import apply_up_axis
+
+        v = np.array([[[1.0, 2.0, 3.0]]], np.float32)
+        np.testing.assert_array_equal(apply_up_axis(v, "y_up"), v)
+        z = apply_up_axis(v, "z_up")
+        np.testing.assert_allclose(z, [[[1.0, 3.0, 2.0]]])
