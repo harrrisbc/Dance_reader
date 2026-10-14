@@ -73,6 +73,10 @@ class AnalysisResult(BaseModel):
     coordFrame: str = ""
     staticCamera: bool = False
     ignoredTracks: int = 0
+    smplSidecar: str | None = None
+    smplSidecarSha256: str | None = None
+    meshCache: str | None = None
+    meshCacheSha256: str | None = None
 
 
 class JobStatus(BaseModel):

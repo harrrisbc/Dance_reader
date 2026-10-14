@@ -1,0 +1,36 @@
+import tempfile
+import unittest
+from pathlib import Path
+
+import numpy as np
+
+from app.pipeline.mesh_cache import load_mesh_cache, load_smpl_sidecar
+from app.schemas import AnalysisResult
+
+
+class TestMeshCacheSchema(unittest.TestCase):
+    def test_analysis_result_defaults_none(self) -> None:
+        r = AnalysisResult(duration=1.0, fps=30.0)
+        self.assertIsNone(r.smplSidecar)
+        self.assertIsNone(r.meshCache)
+
+    def test_load_smpl_sidecar_roundtrip(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            p = Path(tmp) / "x.dance.smpl.npz"
+            np.savez_compressed(
+                p,
+                n_tracks=np.int32(1),
+                n_frames_0=np.int32(2),
+                params_global_0=np.zeros((2, 3), np.float32),  # placeholder shape OK for IO test
+                params_incam_0=np.zeros((2, 3), np.float32),
+                K_0=np.eye(3, dtype=np.float32).reshape(1, 3, 3).repeat(2, axis=0),
+            )
+            data = load_smpl_sidecar(p)
+            self.assertEqual(int(data["n_tracks"]), 1)
+
+    def test_load_mesh_cache_requires_faces(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            p = Path(tmp) / "x.dance.mesh.npz"
+            np.savez_compressed(p, n_tracks=np.int32(0))
+            with self.assertRaises(ValueError):
+                load_mesh_cache(p)
