@@ -277,6 +277,20 @@ class TestResolveSidecarBesideProject(unittest.TestCase):
             self.assertEqual(got, sidecar)
 
 
+class TestMeshCacheRelName(unittest.TestCase):
+    def test_rel_name_for_dance_json(self) -> None:
+        from app.pipeline.mesh_cache import mesh_cache_path_beside_sidecar, mesh_cache_rel_name
+
+        dance = Path("foo.dance.json")
+        self.assertEqual(mesh_cache_rel_name(dance), "foo.dance.mesh.npz")
+        sidecar = Path("/tmp/foo.dance.smpl.npz")
+        mesh_out = mesh_cache_path_beside_sidecar(sidecar)
+        self.assertEqual(mesh_out.name, "foo.dance.mesh.npz")
+        self.assertEqual(mesh_out.parent, sidecar.parent)
+        beside_project = dance.parent / mesh_cache_rel_name(dance)
+        self.assertEqual(beside_project.name, mesh_out.name)
+
+
 class TestPersistSidecar(unittest.TestCase):
     def test_copy_sidecar_next_to_dance_json(self) -> None:
         from app.pipeline.mesh_cache import persist_sidecar_with_project

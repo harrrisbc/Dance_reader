@@ -50,6 +50,7 @@ from app.pipeline.run import analyze_video
 from app.pipeline.mesh_cache import (
     load_mesh_cache,
     load_smpl_sidecar,
+    mesh_cache_path_beside_sidecar,
     persist_mesh_cache_with_project,
     sha256_file,
 )
@@ -453,13 +454,6 @@ class MainWindow(QMainWindow):
         self.actor_combo.currentIndexChanged.connect(self._refresh_mesh_track_layer)
         self._sync_mesh_controls()
 
-    @staticmethod
-    def _sidecar_to_mesh_out(sidecar: Path) -> Path:
-        name = sidecar.name
-        if name.endswith(".dance.smpl.npz"):
-            return sidecar.with_name(name.replace(".dance.smpl.npz", ".dance.mesh.npz"))
-        return sidecar.with_name(f"{sidecar.stem}.dance.mesh.npz")
-
     def _resolve_sidecar_path(self) -> Path | None:
         if self._smpl_sidecar_src is not None and self._smpl_sidecar_src.is_file():
             return self._smpl_sidecar_src
@@ -480,7 +474,7 @@ class MainWindow(QMainWindow):
                 return beside
         sidecar = self._resolve_sidecar_path()
         if sidecar is not None:
-            sibling = self._sidecar_to_mesh_out(sidecar)
+            sibling = mesh_cache_path_beside_sidecar(sidecar)
             if sibling.is_file():
                 return sibling
         return None
@@ -512,7 +506,7 @@ class MainWindow(QMainWindow):
             from app.pipeline.mesh_cache import mesh_cache_rel_name
 
             return self._project_path.parent / mesh_cache_rel_name(self._project_path)
-        return self._sidecar_to_mesh_out(sidecar)
+        return mesh_cache_path_beside_sidecar(sidecar)
 
     def _sync_mesh_controls(self) -> None:
         has_sidecar = self._resolve_sidecar_path() is not None
@@ -1235,7 +1229,15 @@ class MainWindow(QMainWindow):
             self.zoom_timeline(1.25)
 
     def _on_mesh_overlay_toggle(self) -> None:
-        self.decode.request("set_mesh_overlay", self.mesh_overlay_cb.isChecked())
+        checked = self.mesh_overlay_cb.isChecked()
+        self.decode.request("set_mesh_overlay", checked)
+        if not checked:
+            return
+        path = self._resolve_mesh_cache_path()
+        if path is not None and self._mesh_cache_is_valid(path):
+            self._apply_mesh_from_path(path)
+        elif self._resolve_sidecar_path() is not None:
+            self._ensure_mesh_cache()
 
     def _on_floor_toggle(self) -> None:
         self.floor_canvas.setVisible(self.floor_toggle.isChecked())

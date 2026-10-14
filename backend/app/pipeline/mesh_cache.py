@@ -26,7 +26,17 @@ def _archive_to_dict(archive: np.lib.npyio.NpzFile) -> dict[str, Any]:
 
 
 def mesh_cache_rel_name(dance_json_path: Path) -> str:
-    return f"{Path(dance_json_path).stem}.dance.mesh.npz"
+    """Relative mesh cache name beside a project JSON (e.g. foo.dance.json → foo.dance.mesh.npz)."""
+    return f"{Path(dance_json_path).stem}.mesh.npz"
+
+
+def mesh_cache_path_beside_sidecar(sidecar: Path) -> Path:
+    """Absolute path for mesh cache sibling of an SMPL sidecar (e.g. foo.dance.smpl.npz → foo.dance.mesh.npz)."""
+    sidecar = Path(sidecar)
+    name = sidecar.name
+    if name.endswith(".smpl.npz"):
+        return sidecar.with_name(name[: -len(".smpl.npz")] + ".mesh.npz")
+    return sidecar.with_name(f"{sidecar.stem}.mesh.npz")
 
 
 def persist_mesh_cache_with_project(

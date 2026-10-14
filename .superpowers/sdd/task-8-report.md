@@ -53,3 +53,19 @@ PYTHONPATH=backend: from desktop.window import MainWindow  → ok
 
 ### Commit
 Message: `Fix mesh bake status and stale worker on re-analyze.`
+
+---
+
+## Final review fix (mesh cache naming + overlay bake)
+
+**Status:** DONE
+
+### Changes
+- `backend/app/pipeline/mesh_cache.py`: `mesh_cache_rel_name` → `{stem}.mesh.npz` (not double `.dance`); shared `mesh_cache_path_beside_sidecar`.
+- `desktop/window.py`: use shared sidecar→mesh path; overlay toggle calls `_ensure_mesh_cache` when cache missing/invalid (same as 3D viewer).
+- `backend/tests/test_gvhmr_mesh_phase1.py`: `TestMeshCacheRelName`.
+
+### Tests
+```text
+backend: python -m unittest tests.test_gvhmr_mesh_phase1 -v  → 17 run, 15 OK, 2 ERROR (scipy missing in env; ResolveSidecarBesideProject imports)
+```
