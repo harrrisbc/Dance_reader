@@ -4,6 +4,7 @@ Design agent maintains this list. Programming agent: work **top to bottom** unle
 
 | Status | Topic | Handoff | Notes |
 |--------|--------|---------|--------|
+| partial | **P0** GVHMR mesh + 3D viewer + 3D metrics | [AGENT_HANDOFF_GVHMR_MESH_VIEWER_METRICS.md](./AGENT_HANDOFF_GVHMR_MESH_VIEWER_METRICS.md) | Phase 1 code on `cursor/gvhmr-mesh-viewer-phase1` (manual GPU/PyVista acceptance pending); Phase 2 metrics + Phase 3 Live Link not started. Spec [2026-10-14](./superpowers/specs/2026-10-14-gvhmr-mesh-viewer-metrics-design.md) |
 | done | **P1** Motif orphan attach | [AGENT_HANDOFF_MOTIF_ORPHAN_ATTACH.md](./AGENT_HANDOFF_MOTIF_ORPHAN_ATTACH.md) | Strong subseq attach of orphans to kept types; cluster 0.24 untouched |
 | done | **P1** Always-visible time readout | [AGENT_HANDOFF_TIME_READOUT.md](./AGENT_HANDOFF_TIME_READOUT.md) | `0:08.42 / 0:16.20` left of slider; clock before chart throttle |
 | done | **P0** Floor map live during play | [AGENT_HANDOFF_FLOOR_LIVE.md](./AGENT_HANDOFF_FLOOR_LIVE.md) | Floor dot throttled ~10 Hz while playing; no freeze-until-pause |
@@ -35,6 +36,9 @@ Legacy: [AGENT_HANDOFF.md](./AGENT_HANDOFF.md) (Python desktop pivot — superse
 
 ## Deferred (design decided, not scheduled)
 
+- **GVHMR Phase 3 — Live Link / BVH / FBX** — specified in
+  [2026-10-14 mesh/viewer/metrics design](./superpowers/specs/2026-10-14-gvhmr-mesh-viewer-metrics-design.md);
+  schedule after Phase 1–2 land. UE axis conversion needs its own design pass.
 - **Floor homography** (proposal B4) — the floor map stays an orientation aid, not a measuring
   instrument. It needs per-clip corner-clicking from the user and nobody has yet asked for distances
   in metres. Revisit when someone does.
