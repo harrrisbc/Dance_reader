@@ -12,10 +12,16 @@ from pathlib import Path
 from app.pipeline.gvhmr_io import parse_gvhmr_document
 from app.schemas import PoseFrame
 
-_EXPORT_SCRIPT = Path(__file__).resolve().parents[2] / "tools" / "gvhmr_export.py"
+_BACKEND_DIR = Path(__file__).resolve().parents[2]
+_EXPORT_SCRIPT = _BACKEND_DIR / "tools" / "gvhmr_export.py"
+_BAKE_SCRIPT = _BACKEND_DIR / "tools" / "gvhmr_mesh_bake.py"
 
 
 class GvhmrNotConfigured(RuntimeError):
+    pass
+
+
+class MeshBakeError(RuntimeError):
     pass
 
 
@@ -112,3 +118,38 @@ def run_gvhmr_export(
             shutil.copy2(sidecar_path, persisted)
             sidecar_path = persisted
         return tracks, ignored, sidecar_path, sidecar_sha
+
+
+def _mesh_bake_env() -> dict[str, str]:
+    env = os.environ.copy()
+    backend = str(_BACKEND_DIR)
+    existing = env.get("PYTHONPATH", "").strip()
+    env["PYTHONPATH"] = backend if not existing else backend + os.pathsep + existing
+    return env
+
+
+def run_mesh_bake(*, smpl_sidecar: Path, mesh_out: Path, video: Path | None) -> Path:
+    """Subprocess DANCE_GVHMR_PYTHON on gvhmr_mesh_bake.py; cwd=DANCE_GVHMR_ROOT."""
+    python, root = _require_paths()
+    cmd = [
+        str(python),
+        str(_BAKE_SCRIPT),
+        "--smpl",
+        str(smpl_sidecar),
+        "--out",
+        str(mesh_out),
+    ]
+    if video is not None:
+        cmd.extend(["--video", str(video)])
+    proc = subprocess.run(
+        cmd,
+        cwd=str(root),
+        env=_mesh_bake_env(),
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if proc.returncode != 0 or not mesh_out.is_file():
+        tail = "\n".join(proc.stderr.splitlines()[-20:])
+        raise MeshBakeError(tail or f"mesh bake exited {proc.returncode}")
+    return mesh_out

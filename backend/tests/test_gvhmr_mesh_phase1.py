@@ -1,6 +1,9 @@
+import os
+import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 import numpy as np
 
@@ -46,6 +49,87 @@ class TestMeshCacheSchema(unittest.TestCase):
             np.savez_compressed(p, n_tracks=np.int32(0))
             with self.assertRaises(ValueError):
                 load_mesh_cache(p)
+
+
+class TestMeshBakeRunner(unittest.TestCase):
+    def _gvhmr_env(self, tmp: str) -> dict[str, str]:
+        root = Path(tmp) / "gvhmr"
+        weight = root / "inputs" / "checkpoints" / "yolo" / "yolov8x.pt"
+        weight.parent.mkdir(parents=True)
+        weight.write_bytes(b"x")
+        return {
+            "DANCE_GVHMR_PYTHON": sys.executable,
+            "DANCE_GVHMR_ROOT": str(root),
+        }
+
+    def test_missing_python_raises_gvhmr_not_configured(self) -> None:
+        from app.pipeline.gvhmr_run import GvhmrNotConfigured, run_mesh_bake
+
+        with mock.patch.dict(os.environ, {}, clear=True):
+            with self.assertRaises(GvhmrNotConfigured) as ctx:
+                run_mesh_bake(
+                    smpl_sidecar=Path("a.dance.smpl.npz"),
+                    mesh_out=Path("a.dance.mesh.npz"),
+                    video=None,
+                )
+        self.assertIn("DANCE_GVHMR_PYTHON", str(ctx.exception))
+
+    def test_success_subprocess_pythonpath_and_args(self) -> None:
+        from app.pipeline.gvhmr_run import run_mesh_bake
+
+        backend_dir = Path(__file__).resolve().parents[1]
+        with tempfile.TemporaryDirectory() as tmp:
+            sidecar = Path(tmp) / "clip.dance.smpl.npz"
+            sidecar.write_bytes(b"s")
+            mesh_out = Path(tmp) / "clip.dance.mesh.npz"
+            mesh_out.write_bytes(b"m")
+            video = Path(tmp) / "clip.mp4"
+            video.write_bytes(b"v")
+            env = self._gvhmr_env(tmp)
+            with mock.patch.dict(os.environ, env, clear=True):
+                with mock.patch("app.pipeline.gvhmr_run.subprocess.run") as run_mock:
+                    run_mock.return_value = mock.Mock(returncode=0, stderr="")
+                    got = run_mesh_bake(
+                        smpl_sidecar=sidecar,
+                        mesh_out=mesh_out,
+                        video=video,
+                    )
+            self.assertEqual(got, mesh_out)
+            run_mock.assert_called_once()
+            kwargs = run_mock.call_args.kwargs
+            self.assertEqual(kwargs["cwd"], env["DANCE_GVHMR_ROOT"])
+            py_path = kwargs["env"]["PYTHONPATH"]
+            self.assertIn(str(backend_dir), py_path.split(os.pathsep))
+            argv = run_mock.call_args.args[0]
+            self.assertEqual(argv[0], sys.executable)
+            self.assertIn("--smpl", argv)
+            self.assertIn(str(sidecar), argv)
+            self.assertIn("--out", argv)
+            self.assertIn(str(mesh_out), argv)
+            self.assertIn("--video", argv)
+            self.assertIn(str(video), argv)
+
+    def test_nonzero_exit_raises_mesh_bake_error_with_stderr(self) -> None:
+        from app.pipeline.gvhmr_run import MeshBakeError, run_mesh_bake
+
+        with tempfile.TemporaryDirectory() as tmp:
+            sidecar = Path(tmp) / "clip.dance.smpl.npz"
+            sidecar.write_bytes(b"s")
+            mesh_out = Path(tmp) / "clip.dance.mesh.npz"
+            env = self._gvhmr_env(tmp)
+            with mock.patch.dict(os.environ, env, clear=True):
+                with mock.patch("app.pipeline.gvhmr_run.subprocess.run") as run_mock:
+                    run_mock.return_value = mock.Mock(
+                        returncode=2,
+                        stderr="ignored\nboom-from-bake\n",
+                    )
+                    with self.assertRaises(MeshBakeError) as ctx:
+                        run_mesh_bake(
+                            smpl_sidecar=sidecar,
+                            mesh_out=mesh_out,
+                            video=None,
+                        )
+        self.assertIn("boom-from-bake", str(ctx.exception))
 
 
 class TestOverlayPaths(unittest.TestCase):
