@@ -272,6 +272,12 @@ class MainWindow(QMainWindow):
         )
         self.skel_style.currentIndexChanged.connect(self.sync_overlay)
 
+        self.mesh_overlay_cb = QCheckBox("Mesh overlay")
+        self.mesh_overlay_cb.setToolTip(
+            "Soft-rendered mesh video or projected mesh edges on playback."
+        )
+        self.mesh_overlay_cb.stateChanged.connect(self._on_mesh_overlay_toggle)
+
         self.floor_toggle = QCheckBox("Floor map (screen coords)")
         self.floor_toggle.setChecked(True)
         self.floor_toggle.setToolTip(
@@ -312,6 +318,7 @@ class MainWindow(QMainWindow):
         top.addWidget(self.actor_combo)
         top.addWidget(QLabel("Overlay"))
         top.addWidget(self.skel_style)
+        top.addWidget(self.mesh_overlay_cb)
         top.addWidget(QLabel("Max dancers"))
         top.addWidget(self.max_people_spin)
         top.addWidget(self.model_label)
@@ -844,6 +851,9 @@ class MainWindow(QMainWindow):
             self.zoom_timeline(0.8)
         elif event.step < 0:
             self.zoom_timeline(1.25)
+
+    def _on_mesh_overlay_toggle(self) -> None:
+        self.decode.request("set_mesh_overlay", self.mesh_overlay_cb.isChecked())
 
     def _on_floor_toggle(self) -> None:
         self.floor_canvas.setVisible(self.floor_toggle.isChecked())

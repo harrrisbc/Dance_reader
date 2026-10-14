@@ -17,6 +17,19 @@ from app.pipeline.mesh_cache import (
 from app.schemas import AnalysisResult
 
 
+class TestProjectVerts(unittest.TestCase):
+    def test_shape(self) -> None:
+        from app.pipeline.mesh_project import project_verts_to_pixels
+
+        v = np.array([[0.0, 0.0, 2.0]], np.float32)
+        k = np.array(
+            [[1000.0, 0, 500.0], [0, 1000.0, 500.0], [0, 0, 1]],
+            np.float32,
+        )
+        uv = project_verts_to_pixels(v, k, width=1000, height=1000)
+        self.assertEqual(uv.shape, (1, 2))
+
+
 class TestMeshCacheSchema(unittest.TestCase):
     def test_analysis_result_defaults_none(self) -> None:
         r = AnalysisResult(duration=1.0, fps=30.0)

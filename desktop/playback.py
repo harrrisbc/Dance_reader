@@ -13,9 +13,14 @@ import numpy as np
 from PySide6.QtCore import QThread, Signal
 from PySide6.QtGui import QImage
 
+from app.pipeline.mesh_project import face_edge_pairs, project_verts_to_pixels
 from app.pipeline.smpl_skeleton import skeleton_edges
 
 PREVIEW_MAX_W = 960
+MESH_EDGE_STRIDE = 8
+MESH_EDGE_COLOR = (200, 140, 255)
+MESH_EDGE_ALPHA = 0.45
+MESH_TIME_TOLERANCE_S = 0.35
 MAX_SEQUENTIAL_READS = 8
 PLAYHEAD_HINT_HZ = 30  # worker emit cadence target while playing
 
@@ -49,6 +54,9 @@ class VideoDecodeWorker(QThread):
         self._draw_skeleton = True
         self._skel_style = "skeleton"  # off | joints | skeleton
         self._path: Path | None = None
+        self._mesh_overlay = False
+        self._mesh_layer: Path | dict[str, Any] | None = None
+        self._overlay_cap: cv2.VideoCapture | None = None
 
     def request(self, cmd: str, payload: Any = None) -> None:
         self._cmds.put((cmd, payload))
@@ -121,6 +129,35 @@ class VideoDecodeWorker(QThread):
                 self._skel_style = str(style or "skeleton")
             self._draw_skeleton = self._skel_style != "off"
             return
+        if cmd == "set_mesh_overlay":
+            self._mesh_overlay = bool(payload)
+            return
+        if cmd == "set_mesh_layer":
+            self._set_mesh_layer(payload)
+            return
+
+    def _set_mesh_layer(self, payload: Any) -> None:
+        self._release_overlay_cap()
+        if payload is None:
+            self._mesh_layer = None
+            return
+        if isinstance(payload, (str, Path)):
+            path = Path(payload)
+            self._mesh_layer = path
+            if path.is_file():
+                cap = cv2.VideoCapture(str(path))
+                if cap.isOpened():
+                    self._overlay_cap = cap
+            return
+        if isinstance(payload, dict):
+            self._mesh_layer = payload
+            return
+        self._mesh_layer = None
+
+    def _release_overlay_cap(self) -> None:
+        if self._overlay_cap is not None:
+            self._overlay_cap.release()
+            self._overlay_cap = None
 
     def _open(self, path: Path) -> None:
         self._playing = False
@@ -141,6 +178,7 @@ class VideoDecodeWorker(QThread):
         if self._cap is not None:
             self._cap.release()
             self._cap = None
+        self._release_overlay_cap()
         self._pos = -1
 
     def _advance_clock(self) -> None:
@@ -224,6 +262,9 @@ class VideoDecodeWorker(QThread):
                 interpolation=cv2.INTER_AREA,
             )
 
+        if self._mesh_overlay and self._mesh_layer is not None:
+            frame = self._composite_mesh(frame, frame_idx, t)
+
         draw = self._draw_skeleton and bool(self._overlay)
 
         if draw:
@@ -235,6 +276,90 @@ class VideoDecodeWorker(QThread):
         rgb = np.ascontiguousarray(rgb)
         qimg = QImage(rgb.data, w, h, ch * w, QImage.Format.Format_RGB888).copy()
         self.frame_ready.emit(qimg, frame_idx, t, playing)
+
+    def _composite_mesh(
+        self, frame: np.ndarray, frame_idx: int, t: float
+    ) -> np.ndarray:
+        if isinstance(self._mesh_layer, Path):
+            baked = self._read_overlay_frame(frame_idx, frame.shape[:2])
+            return baked if baked is not None else frame
+        if isinstance(self._mesh_layer, dict):
+            return self._draw_mesh_edges(frame, t)
+        return frame
+
+    def _read_overlay_frame(
+        self, frame_idx: int, target_hw: tuple[int, int]
+    ) -> np.ndarray | None:
+        if self._overlay_cap is None:
+            return None
+        self._overlay_cap.set(cv2.CAP_PROP_POS_FRAMES, frame_idx)
+        ok, ov = self._overlay_cap.read()
+        if not ok or ov is None:
+            return None
+        th, tw = target_hw
+        oh, ow = ov.shape[:2]
+        if (oh, ow) != (th, tw):
+            ov = cv2.resize(ov, (tw, th), interpolation=cv2.INTER_AREA)
+        return ov
+
+    def _draw_mesh_edges(self, frame: np.ndarray, t: float) -> np.ndarray:
+        layer = self._mesh_layer
+        if not isinstance(layer, dict):
+            return frame
+        times = np.asarray(layer.get("times"), dtype=np.float64)
+        verts = layer.get("verts_incam")
+        faces = layer.get("faces")
+        k = layer.get("K")
+        if times.size == 0 or verts is None or faces is None or k is None:
+            return frame
+        verts_arr = np.asarray(verts, dtype=np.float32)
+        if verts_arr.ndim == 3:
+            idx = int(np.argmin(np.abs(times - t)))
+            if abs(float(times[idx]) - t) > MESH_TIME_TOLERANCE_S:
+                return frame
+            verts_arr = verts_arr[idx]
+            k_use = np.asarray(k, dtype=np.float32)
+            if k_use.ndim == 3:
+                k_use = k_use[idx]
+        else:
+            idx = int(np.argmin(np.abs(times - t)))
+            if abs(float(times[idx]) - t) > MESH_TIME_TOLERANCE_S:
+                return frame
+            k_use = np.asarray(k, dtype=np.float32)
+            if k_use.ndim == 3:
+                k_use = k_use[idx]
+
+        src_w = int(layer.get("width") or frame.shape[1])
+        src_h = int(layer.get("height") or frame.shape[0])
+        h, w = frame.shape[:2]
+        sx = w / max(src_w, 1)
+        sy = h / max(src_h, 1)
+
+        uv = project_verts_to_pixels(verts_arr, k_use, width=src_w, height=src_h)
+        uv[:, 0] *= sx
+        uv[:, 1] *= sy
+
+        edges = face_edge_pairs(np.asarray(faces), stride=MESH_EDGE_STRIDE)
+        if edges.size == 0:
+            return frame
+
+        layer_img = frame.copy()
+        for a, b in edges:
+            if a >= len(uv) or b >= len(uv):
+                continue
+            pa, pb = uv[a], uv[b]
+            if not np.isfinite(pa).all() or not np.isfinite(pb).all():
+                continue
+            p0 = (int(round(float(pa[0]))), int(round(float(pa[1]))))
+            p1 = (int(round(float(pb[0]))), int(round(float(pb[1]))))
+            if not (-w <= p0[0] <= 2 * w and -h <= p0[1] <= 2 * h):
+                continue
+            if not (-w <= p1[0] <= 2 * w and -h <= p1[1] <= 2 * h):
+                continue
+            cv2.line(layer_img, p0, p1, MESH_EDGE_COLOR, 1, lineType=cv2.LINE_AA)
+        out = frame.copy()
+        cv2.addWeighted(layer_img, MESH_EDGE_ALPHA, out, 1.0 - MESH_EDGE_ALPHA, 0, out)
+        return out
 
     def _draw_poses(self, frame: np.ndarray, t: float) -> np.ndarray:
         if not self._overlay or self._skel_style == "off":
