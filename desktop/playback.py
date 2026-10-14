@@ -13,7 +13,11 @@ import numpy as np
 from PySide6.QtCore import QThread, Signal
 from PySide6.QtGui import QImage
 
-from app.pipeline.mesh_project import face_edge_pairs, project_verts_to_pixels
+from app.pipeline.mesh_project import (
+    blend_mesh_overlay,
+    face_edge_pairs,
+    project_verts_to_pixels,
+)
 from app.pipeline.smpl_skeleton import skeleton_edges
 
 PREVIEW_MAX_W = 960
@@ -282,7 +286,9 @@ class VideoDecodeWorker(QThread):
     ) -> np.ndarray:
         if isinstance(self._mesh_layer, Path):
             baked = self._read_overlay_frame(frame_idx, frame.shape[:2])
-            return baked if baked is not None else frame
+            if baked is not None:
+                return blend_mesh_overlay(frame, baked, alpha=MESH_EDGE_ALPHA)
+            return frame
         if isinstance(self._mesh_layer, dict):
             return self._draw_mesh_edges(frame, t)
         return frame

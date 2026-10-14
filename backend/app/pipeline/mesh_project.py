@@ -49,3 +49,35 @@ def face_edge_pairs(faces: np.ndarray, *, stride: int = 8) -> np.ndarray:
     )
     edges = np.sort(edges, axis=1)
     return np.unique(edges, axis=0)
+
+
+# Sum of BGR channels below this is treated as empty overlay (bake uses black bg).
+MESH_OVERLAY_BLACK_THRESHOLD = 8
+
+
+def blend_mesh_overlay(
+    frame: np.ndarray,
+    overlay: np.ndarray,
+    *,
+    alpha: float = 0.45,
+    black_threshold: int = MESH_OVERLAY_BLACK_THRESHOLD,
+) -> np.ndarray:
+    """Alpha-composite a mesh-only overlay (black background) onto a video frame."""
+    if frame.shape[:2] != overlay.shape[:2]:
+        raise ValueError("frame and overlay must have the same height and width")
+    if frame.ndim != 3 or frame.shape[2] != 3:
+        raise ValueError("frame must be BGR (H, W, 3)")
+    if overlay.ndim != 3 or overlay.shape[2] != 3:
+        raise ValueError("overlay must be BGR (H, W, 3)")
+
+    strength = overlay.astype(np.int32).sum(axis=2)
+    mask = strength > int(black_threshold)
+    if not np.any(mask):
+        return frame
+
+    a = float(alpha)
+    out = frame.copy()
+    base = frame[mask].astype(np.float32)
+    top = overlay[mask].astype(np.float32)
+    out[mask] = (base * (1.0 - a) + top * a).astype(np.uint8)
+    return out

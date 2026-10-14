@@ -30,6 +30,27 @@ class TestProjectVerts(unittest.TestCase):
         self.assertEqual(uv.shape, (1, 2))
 
 
+class TestBlendMeshOverlay(unittest.TestCase):
+    def test_black_overlay_leaves_frame(self) -> None:
+        from app.pipeline.mesh_project import blend_mesh_overlay
+
+        frame = np.full((4, 4, 3), (10, 20, 30), np.uint8)
+        overlay = np.zeros((4, 4, 3), np.uint8)
+        out = blend_mesh_overlay(frame, overlay, alpha=0.5)
+        np.testing.assert_array_equal(out, frame)
+
+    def test_mesh_pixels_blend_onto_frame(self) -> None:
+        from app.pipeline.mesh_project import blend_mesh_overlay
+
+        frame = np.zeros((2, 2, 3), np.uint8)
+        frame[0, 0] = (100, 0, 0)
+        overlay = np.zeros((2, 2, 3), np.uint8)
+        overlay[0, 0] = (200, 200, 200)
+        out = blend_mesh_overlay(frame, overlay, alpha=0.5)
+        np.testing.assert_array_equal(out[0, 0], (150, 100, 100))
+        np.testing.assert_array_equal(out[0, 1], frame[0, 1])
+
+
 class TestMeshCacheSchema(unittest.TestCase):
     def test_analysis_result_defaults_none(self) -> None:
         r = AnalysisResult(duration=1.0, fps=30.0)

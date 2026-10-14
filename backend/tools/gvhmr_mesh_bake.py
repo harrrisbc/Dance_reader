@@ -169,6 +169,7 @@ def _render_incam_overlay(
     fps: float = 30.0,
     crf: int = 23,
 ) -> None:
+    import numpy as np
     import torch
     from hmr4d.utils.video_io_utils import get_video_lwh, get_video_reader, get_writer
     from hmr4d.utils.vis.renderer import Renderer
@@ -184,7 +185,9 @@ def _render_incam_overlay(
             if i >= verts_incam.shape[0]:
                 break
             v = torch.as_tensor(verts_incam[i], device="cuda")
-            img = renderer.render_mesh(v, img_raw, [0.8, 0.8, 0.8])
+            # Mesh-only layer: render on black so playback can alpha-composite.
+            black_bg = np.zeros_like(img_raw)
+            img = renderer.render_mesh(v, black_bg, [0.8, 0.8, 0.8])
             writer.write_frame(img)
     finally:
         writer.close()
