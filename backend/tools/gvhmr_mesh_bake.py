@@ -135,6 +135,7 @@ def write_bake(
                 k_fullimg=np.asarray(sidecar["K_0"], dtype=np.float32),
                 faces=faces_smpl,
                 overlay_path=overlay_path,
+                fps=fps,
             )
         except Exception as exc:
             print(f"warning: overlay render failed: {exc}", file=sys.stderr)
@@ -149,6 +150,7 @@ def write_bake(
 
 
 def _verts(smplx, smplx2smpl, params: dict):
+    import numpy as np
     import torch
     from hmr4d.utils.net_utils import to_cuda
 
@@ -164,6 +166,7 @@ def _render_incam_overlay(
     k_fullimg: "np.ndarray",
     faces: "np.ndarray",
     overlay_path: Path,
+    fps: float = 30.0,
     crf: int = 23,
 ) -> None:
     import torch
@@ -175,7 +178,7 @@ def _render_incam_overlay(
     renderer = Renderer(width, height, device="cuda", faces=faces, K=k0)
     reader = get_video_reader(video)
     overlay_path.parent.mkdir(parents=True, exist_ok=True)
-    writer = get_writer(overlay_path, fps=30, crf=crf)
+    writer = get_writer(overlay_path, fps=fps, crf=crf)
     try:
         for i, img_raw in enumerate(reader):
             if i >= verts_incam.shape[0]:
