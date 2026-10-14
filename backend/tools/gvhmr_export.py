@@ -8,8 +8,13 @@ from __future__ import annotations
 
 import argparse
 import json
+import sys
 import uuid
 from pathlib import Path
+
+
+def _dance_backend_dir() -> Path:
+    return Path(__file__).resolve().parents[1]
 
 
 def main() -> None:
@@ -28,6 +33,17 @@ def write_export(video: Path, out: Path, *, max_people: int) -> None:
     import torch
     from hydra import compose, initialize_config_module
 
+    # PyTorch 2.6+ defaults weights_only=True; YOLO / Lightning ckpts need False.
+    if not getattr(torch.load, "_dance_full_load", False):
+        _torch_load = torch.load
+
+        def _load(*args, **kwargs):
+            kwargs.setdefault("weights_only", False)
+            return _torch_load(*args, **kwargs)
+
+        _load._dance_full_load = True  # type: ignore[attr-defined]
+        torch.load = _load  # type: ignore[assignment]
+
     from hmr4d.configs import register_store_gvhmr
     from hmr4d.model.gvhmr.gvhmr_pl_demo import DemoPL
     from hmr4d.utils.geo.hmr_cam import estimate_K, get_bbx_xys_from_xyxy
@@ -36,6 +52,11 @@ def write_export(video: Path, out: Path, *, max_people: int) -> None:
     from hmr4d.utils.preproc import Extractor, Tracker, VitPoseExtractor
     from hmr4d.utils.smplx_utils import make_smplx
     from hmr4d.utils.video_io_utils import get_video_lwh
+
+    backend = _dance_backend_dir()
+    if str(backend) not in sys.path:
+        sys.path.insert(0, str(backend))
+    from app.pipeline.mesh_cache import save_smpl_sidecar, sha256_file
 
     # 1. history = Tracker().track(str(video))
     history = Tracker().track(str(video))
@@ -52,6 +73,7 @@ def write_export(video: Path, out: Path, *, max_people: int) -> None:
     ignored = max(0, len(ranked) - max_people)
 
     tracks: list[dict] = []
+    smpl_tracks: list[dict] = []
     if kept:
         # 7. time = frame_index / cv2 fps of the original video.
         fps = _original_fps(cv2, video)
@@ -135,14 +157,37 @@ def write_export(video: Path, out: Path, *, max_people: int) -> None:
                     height,
                 )
                 tracks.append({"frames": frames})
+                smpl_tracks.append(_sidecar_track(pred))
 
+    sidecar_path = out.with_name(out.stem + ".dance.smpl.npz")
+    save_smpl_sidecar(sidecar_path, smpl_tracks)
     payload = {
         "staticCamera": True,
         "coordFrame": "gvhmr_world",
         "ignoredTracks": ignored,
         "tracks": tracks,
+        "smplSidecar": sidecar_path.name,
+        "smplSidecarSha256": sha256_file(sidecar_path),
     }
+    out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text(json.dumps(payload), encoding="utf-8")
+
+
+def _sidecar_track(pred: dict) -> dict:
+    import numpy as np
+
+    from app.pipeline.mesh_cache import SMPL_PARAM_KEYS
+
+    def params_numpy(params: dict) -> dict[str, np.ndarray]:
+        return {
+            key: params[key].detach().cpu().numpy().astype(np.float32) for key in SMPL_PARAM_KEYS
+        }
+
+    return {
+        "global": params_numpy(pred["smpl_params_global"]),
+        "incam": params_numpy(pred["smpl_params_incam"]),
+        "K": pred["K_fullimg"].detach().cpu().numpy().astype(np.float32),
+    }
 
 
 def _group_ids(history: list) -> tuple[dict[int, list[int]], dict[int, list]]:

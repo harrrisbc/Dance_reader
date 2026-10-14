@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 from pathlib import Path
 from typing import Any
 
@@ -23,6 +24,37 @@ def _archive_to_dict(archive: np.lib.npyio.NpzFile) -> dict[str, Any]:
     return {k: np.asarray(archive[k]) for k in archive.files}
 
 
+def sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1 << 20), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def save_smpl_sidecar(path: Path, tracks: list[dict[str, Any]]) -> None:
+    """Write SMPL params for each track with g{i}_ / c{i}_ prefixed keys."""
+    arrays: dict[str, np.ndarray] = {"n_tracks": np.int32(len(tracks))}
+    for i, track in enumerate(tracks):
+        global_params = track["global"]
+        incam_params = track["incam"]
+        k = np.asarray(track["K"], dtype=np.float32)
+        n_frames: int | None = None
+        for key in SMPL_PARAM_KEYS:
+            g_arr = np.asarray(global_params[key], dtype=np.float32)
+            c_arr = np.asarray(incam_params[key], dtype=np.float32)
+            if n_frames is None:
+                n_frames = int(g_arr.shape[0])
+            arrays[f"g{i}_{key}"] = g_arr
+            arrays[f"c{i}_{key}"] = c_arr
+        if n_frames is None:
+            n_frames = int(k.shape[0])
+        arrays[f"K_{i}"] = k
+        arrays[f"n_frames_{i}"] = np.int32(n_frames)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    np.savez_compressed(path, **arrays)
+
+
 def load_smpl_sidecar(path: Path) -> dict[str, Any]:
     with np.load(path, allow_pickle=False) as archive:
         keys = set(archive.files)
@@ -30,14 +62,11 @@ def load_smpl_sidecar(path: Path) -> dict[str, Any]:
         n_tracks = int(archive["n_tracks"])
         per_track: list[str] = []
         for i in range(n_tracks):
-            per_track.extend(
-                [
-                    f"n_frames_{i}",
-                    f"params_global_{i}",
-                    f"params_incam_{i}",
-                    f"K_{i}",
-                ]
-            )
+            per_track.append(f"n_frames_{i}")
+            per_track.append(f"K_{i}")
+            for key in SMPL_PARAM_KEYS:
+                per_track.append(f"g{i}_{key}")
+                per_track.append(f"c{i}_{key}")
         _require_keys(keys, per_track, "smpl sidecar")
         return _archive_to_dict(archive)
 
