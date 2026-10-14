@@ -37,7 +37,7 @@ App venv: **no** torch / hmr4d for viewing. Mesh bake and SMPL forward stay in `
 ### Phase 1 — See the person
 
 1. Extend GVHMR export to write `smpl_params_global`, `smpl_params_incam`, and `K_fullimg` into a sidecar `*.dance.smpl.npz` (or equivalent); JSON gets `smplSidecar` + hash. Keep existing `joints3d` / `keypoints`.
-2. Add first-play bake subprocess: verts_incam, verts_world, faces, times/mask → `*.dance.mesh.npz`; prefer soft-rendered translucent overlay for video composite.
+2. Add on project load / after Analyze bake subprocess: verts_incam, verts_world, faces, times/mask → `*.dance.mesh.npz`; prefer soft-rendered translucent overlay for video composite.
 3. Desktop: left video + right 3D viewer; **Mesh overlay** and **3D viewer** checkboxes independent of Skeleton/Joints/Off.
 4. Composite baked overlay (or projected-edge fallback) on decoded frames; PyVista/pyvistaqt (or approved Qt GL) for `verts_world`.
 5. Status strings: `Building mesh cache…`; clear errors if `SMPL_NEUTRAL.pkl` missing for preferred render path.
@@ -59,7 +59,7 @@ App venv: **no** torch / hmr4d for viewing. Mesh bake and SMPL forward stay in `
 ### Phase 1
 
 - [ ] Analyze produces JSON + params sidecar; joints/wire still work.
-- [ ] First play builds mesh cache; second play reuses it (no full re-bake).
+- [ ] On project load / after Analyze, missing cache triggers bake; reopen reuses cache (no full re-bake).
 - [ ] Wire and mesh can both be on; either can be off.
 - [ ] 3D viewer orbits and follows the playhead.
 - [ ] Bake failure does not kill wire playback; status explains the failure.

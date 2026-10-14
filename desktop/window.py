@@ -202,8 +202,11 @@ class MainWindow(QMainWindow):
         self.worker: AnalyzeWorker | None = None
         self._smpl_sidecar_src: Path | None = None
         self._mesh_bake_worker: MeshBakeWorker | None = None
+        self._mesh_bake_gen = 0
+        self._mesh_bake_active_sidecar: Path | None = None
         self._mesh_times: np.ndarray | None = None
         self._status_before_bake = ""
+        self._status_after_bake: str | None = None
         self.selected_type_id: str | None = None
         self.selected_occ_id: str | None = None
         self._sim_counter = 0
@@ -539,38 +542,82 @@ class MainWindow(QMainWindow):
             self.decode.request("set_mesh_overlay", False)
             self.decode.request("set_mesh_layer", None)
 
-    def _ensure_mesh_cache(self) -> None:
+    def _cancel_mesh_bake_worker(self) -> None:
+        worker = self._mesh_bake_worker
+        if worker is None:
+            return
+        try:
+            worker.finished_ok.disconnect(self._on_mesh_bake_ok)
+        except (RuntimeError, TypeError):
+            pass
+        try:
+            worker.finished_err.disconnect(self._on_mesh_bake_err)
+        except (RuntimeError, TypeError):
+            pass
+        self._mesh_bake_worker = None
+        self._mesh_bake_active_sidecar = None
+        self._mesh_bake_gen += 1
+
+    def _mesh_bake_status_label(self, *, suffix: str = "") -> str:
+        base = "Building mesh cache…"
+        if suffix:
+            return f"{base} ({suffix})"
+        return base
+
+    def _ensure_mesh_cache(self) -> bool:
+        """Start background bake if needed. Returns True if a bake is running."""
         sidecar = self._resolve_sidecar_path()
         if sidecar is None or self.analysis is None:
             self._sync_mesh_controls()
-            return
+            return False
         self._sync_mesh_controls()
         existing = self._resolve_mesh_cache_path()
         if existing is not None and self._mesh_cache_is_valid(existing):
             self._apply_mesh_from_path(existing)
-            return
-        if self._mesh_bake_worker is not None and self._mesh_bake_worker.isRunning():
-            return
+            return False
+        worker = self._mesh_bake_worker
+        if worker is not None and worker.isRunning():
+            if self._mesh_bake_active_sidecar == sidecar:
+                return True
+            self._cancel_mesh_bake_worker()
         mesh_out = self._mesh_bake_out_path(sidecar)
         self._status_before_bake = self.status.text()
-        self.status.setText("Building mesh cache…")
+        suffix = ""
+        if self._project_path is not None:
+            suffix = self._project_path.name
+        self.status.setText(self._mesh_bake_status_label(suffix=suffix))
+        bake_gen = self._mesh_bake_gen + 1
+        self._mesh_bake_gen = bake_gen
+        self._mesh_bake_active_sidecar = sidecar
         worker = MeshBakeWorker(
             sidecar=sidecar,
             mesh_out=mesh_out,
             video=self.video_path,
         )
-        worker.finished_ok.connect(self._on_mesh_bake_ok)
-        worker.finished_err.connect(self._on_mesh_bake_err)
+        worker.finished_ok.connect(
+            lambda path, g=bake_gen, sc=sidecar: self._on_mesh_bake_ok(path, g, sc)
+        )
+        worker.finished_err.connect(
+            lambda msg, g=bake_gen, sc=sidecar: self._on_mesh_bake_err(msg, g, sc)
+        )
         self._mesh_bake_worker = worker
         worker.start()
+        return True
 
-    def _on_mesh_bake_ok(self, mesh_path: object) -> None:
+    def _on_mesh_bake_ok(
+        self, mesh_path: object, bake_gen: int, sidecar: Path
+    ) -> None:
+        if bake_gen != self._mesh_bake_gen:
+            return
+        active = self._resolve_sidecar_path()
+        if active is None or active.resolve() != sidecar.resolve():
+            return
         if not isinstance(mesh_path, Path) or self.analysis is None:
             return
         try:
             digest = sha256_file(mesh_path)
         except OSError as exc:
-            self._on_mesh_bake_err(str(exc))
+            self._set_mesh_bake_status_error(str(exc))
             return
         rel = mesh_path.name
         resolved = mesh_path
@@ -582,10 +629,18 @@ class MainWindow(QMainWindow):
         self.analysis.meshCacheSha256 = digest
         self._dirty = True
         self._apply_mesh_from_path(resolved)
-        prior = getattr(self, "_status_before_bake", "") or ""
-        self.status.setText(prior if prior else "Mesh cache ready")
+        after = self._status_after_bake
+        if after:
+            self.status.setText(after)
+            self._status_after_bake = None
+        else:
+            prior = self._status_before_bake or ""
+            self.status.setText(prior if prior else "Mesh cache ready")
+        self._mesh_bake_active_sidecar = None
+        if self._mesh_bake_worker is not None and not self._mesh_bake_worker.isRunning():
+            self._mesh_bake_worker = None
 
-    def _on_mesh_bake_err(self, msg: str) -> None:
+    def _set_mesh_bake_status_error(self, msg: str) -> None:
         text = msg.strip()
         if text:
             line = text.splitlines()[-1].strip()
@@ -594,6 +649,18 @@ class MainWindow(QMainWindow):
         if len(line) > 220:
             line = line[:217] + "..."
         self.status.setText(f"Mesh bake: {line}")
+
+    def _on_mesh_bake_err(self, msg: str, bake_gen: int, sidecar: Path) -> None:
+        if bake_gen != self._mesh_bake_gen:
+            return
+        active = self._resolve_sidecar_path()
+        if active is None or active.resolve() != sidecar.resolve():
+            return
+        self._status_after_bake = None
+        self._mesh_bake_active_sidecar = None
+        if self._mesh_bake_worker is not None and not self._mesh_bake_worker.isRunning():
+            self._mesh_bake_worker = None
+        self._set_mesh_bake_status_error(msg)
 
     def _persist_analysis_json(self) -> None:
         if self._project_path is None or self.analysis is None or self.video_path is None:
@@ -614,7 +681,7 @@ class MainWindow(QMainWindow):
             mesh_data = load_mesh_cache(mesh_path)
             smpl = load_smpl_sidecar(sidecar)
         except (OSError, ValueError) as exc:
-            self._on_mesh_bake_err(str(exc))
+            self._set_mesh_bake_status_error(str(exc))
             return
 
         idx = self._mesh_track_index()
@@ -707,6 +774,8 @@ class MainWindow(QMainWindow):
             self.floor_canvas.draw_idle()
             self.sync_overlay()
             self._smpl_sidecar_src = None
+            self._cancel_mesh_bake_worker()
+            self._status_after_bake = None
             self._mesh_times = None
             self.mesh_view.clear()
             self.decode.request("set_mesh_layer", None)
@@ -848,6 +917,8 @@ class MainWindow(QMainWindow):
             return
         if self.worker and self.worker.isRunning():
             return
+        self._cancel_mesh_bake_worker()
+        self._status_after_bake = None
         n = int(self.max_people_spin.value())
         model_name = self.selected_pose_model()
         self._last_pose_model = model_name
@@ -1023,6 +1094,7 @@ class MainWindow(QMainWindow):
             self._last_pose_model = resolve_pose_model(project.pose_model)
 
         project_json = Path(path)
+        self._cancel_mesh_bake_worker()
         self.analysis = project.analysis
         self.track_buffers = buffers_from_analysis(project.analysis)
         self._project_path = project_json
@@ -1033,11 +1105,15 @@ class MainWindow(QMainWindow):
         self.load_video(video, clear_analysis=False)
         self.apply_analysis_to_ui(seek_first_motif=False)
         self.sync_overlay()
-        self._ensure_mesh_cache()
-        self.status.setText(
+        loaded_msg = (
             f"Loaded project: {Path(path).name} ({len(project.analysis.actors)} dancers, "
             f"{len(project.analysis.motifTypes)} types) — no re-analysis needed"
         )
+        self._status_after_bake = loaded_msg
+        baking = self._ensure_mesh_cache()
+        if not baking:
+            self._status_after_bake = None
+            self.status.setText(loaded_msg)
 
     def find_similar(self) -> None:
         if not self.analysis or not self.track_buffers:
