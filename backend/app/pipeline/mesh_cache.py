@@ -43,12 +43,27 @@ def save_smpl_sidecar(path: Path, tracks: list[dict[str, Any]]) -> None:
         for key in SMPL_PARAM_KEYS:
             g_arr = np.asarray(global_params[key], dtype=np.float32)
             c_arr = np.asarray(incam_params[key], dtype=np.float32)
+            g_t = int(g_arr.shape[0])
+            c_t = int(c_arr.shape[0])
             if n_frames is None:
-                n_frames = int(g_arr.shape[0])
+                n_frames = g_t
+            if g_t != n_frames:
+                raise ValueError(
+                    f"smpl sidecar track {i}: g{i}_{key} has T={g_t}, expected T={n_frames}"
+                )
+            if c_t != n_frames:
+                raise ValueError(
+                    f"smpl sidecar track {i}: c{i}_{key} has T={c_t}, expected T={n_frames}"
+                )
             arrays[f"g{i}_{key}"] = g_arr
             arrays[f"c{i}_{key}"] = c_arr
+        k_t = int(k.shape[0])
         if n_frames is None:
-            n_frames = int(k.shape[0])
+            n_frames = k_t
+        elif k_t != n_frames:
+            raise ValueError(
+                f"smpl sidecar track {i}: K has T={k_t}, expected T={n_frames}"
+            )
         arrays[f"K_{i}"] = k
         arrays[f"n_frames_{i}"] = np.int32(n_frames)
     path.parent.mkdir(parents=True, exist_ok=True)

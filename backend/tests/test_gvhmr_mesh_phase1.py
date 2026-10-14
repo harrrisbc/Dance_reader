@@ -72,3 +72,28 @@ class TestSaveSmplSidecar(unittest.TestCase):
             self.assertTrue(p.is_file())
             self.assertEqual(len(sha256_file(p)), 64)
             load_smpl_sidecar(p)
+
+    def test_mismatched_frame_count_raises(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            p = Path(tmp) / "clip.dance.smpl.npz"
+            tracks = [
+                {
+                    "global": {
+                        "body_pose": np.zeros((2, 63), np.float32),
+                        "betas": np.zeros((2, 10), np.float32),
+                        "global_orient": np.zeros((2, 3), np.float32),
+                        "transl": np.zeros((2, 3), np.float32),
+                    },
+                    "incam": {
+                        "body_pose": np.zeros((2, 63), np.float32),
+                        "betas": np.zeros((2, 10), np.float32),
+                        "global_orient": np.zeros((2, 3), np.float32),
+                        "transl": np.zeros((2, 3), np.float32),
+                    },
+                    "K": np.eye(3, dtype=np.float32).reshape(1, 3, 3).repeat(3, 0),
+                }
+            ]
+            with self.assertRaises(ValueError) as ctx:
+                save_smpl_sidecar(p, tracks)
+            self.assertIn("K has T=3", str(ctx.exception))
+            self.assertIn("expected T=2", str(ctx.exception))
