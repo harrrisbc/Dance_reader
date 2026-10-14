@@ -4,7 +4,7 @@ Design agent maintains this list. Programming agent: work **top to bottom** unle
 
 | Status | Topic | Handoff | Notes |
 |--------|--------|---------|--------|
-| partial | **P0** GVHMR mesh + 3D viewer + 3D metrics | [AGENT_HANDOFF_GVHMR_MESH_VIEWER_METRICS.md](./AGENT_HANDOFF_GVHMR_MESH_VIEWER_METRICS.md) | Phase 1 code on `cursor/gvhmr-mesh-viewer-phase1` (manual GPU/PyVista acceptance pending); Phase 2 metrics + Phase 3 Live Link not started. Spec [2026-10-14](./superpowers/specs/2026-10-14-gvhmr-mesh-viewer-metrics-design.md) |
+| done | **P0** GVHMR mesh + 3D viewer + 3D metrics | [AGENT_HANDOFF_GVHMR_MESH_VIEWER_METRICS.md](./AGENT_HANDOFF_GVHMR_MESH_VIEWER_METRICS.md) | Phase 1+2 on tree; notes [IMPLEMENTATION_NOTES_GVHMR_3D_METRICS.md](./IMPLEMENTATION_NOTES_GVHMR_3D_METRICS.md). Phase 3 Live Link deferred |
 | done | **P1** Motif orphan attach | [AGENT_HANDOFF_MOTIF_ORPHAN_ATTACH.md](./AGENT_HANDOFF_MOTIF_ORPHAN_ATTACH.md) | Strong subseq attach of orphans to kept types; cluster 0.24 untouched |
 | done | **P1** Always-visible time readout | [AGENT_HANDOFF_TIME_READOUT.md](./AGENT_HANDOFF_TIME_READOUT.md) | `0:08.42 / 0:16.20` left of slider; clock before chart throttle |
 | done | **P0** Floor map live during play | [AGENT_HANDOFF_FLOOR_LIVE.md](./AGENT_HANDOFF_FLOOR_LIVE.md) | Floor dot throttled ~10 Hz while playing; no freeze-until-pause |
@@ -13,7 +13,7 @@ Design agent maintains this list. Programming agent: work **top to bottom** unle
 | done | **W2** Feature correctness | [AGENT_HANDOFF_MATCH_W2_FEATURES.md](./AGENT_HANDOFF_MATCH_W2_FEATURES.md) | Masks + energy scale + SG smooth + drop penalty; distances compressed → W3 must retune |
 | done | **W3** Thresholds in distance units | [AGENT_HANDOFF_MATCH_W3_THRESHOLDS.md](./AGENT_HANDOFF_MATCH_W3_THRESHOLDS.md) | Raw DTW gates 0.28/0.30 + min_occ=3; neg→0; display % only |
 | done | **W4** Find Similar by subsequence DTW | [AGENT_HANDOFF_MATCH_W4_SUBSEQUENCE.md](./AGENT_HANDOFF_MATCH_W4_SUBSEQUENCE.md) | Open-begin subseq DTW; tempo ratio ≤2×; query≠valley |
-| pending | `level` redefinition | [AGENT_HANDOFF_LEVEL_DEFINITION.md](./AGENT_HANDOFF_LEVEL_DEFINITION.md) | Hip→supporting-ankle vertical drop / torso height. Independent of W1–W4 |
+| done | `level` redefinition | [AGENT_HANDOFF_LEVEL_DEFINITION.md](./AGENT_HANDOFF_LEVEL_DEFINITION.md) | Shipped with GVHMR Phase 2 (hip→supporting ankle / torso) |
 | answered | Metric & matching math proposal | [PROPOSAL_METRIC_MATH.md](./PROPOSAL_METRIC_MATH.md) | From programming agent. All items decided → W1–W4 + level. B4 floor homography deferred |
 | done | Analyze model picker S / M | [AGENT_HANDOFF_POSE_MODEL_PICKER.md](./AGENT_HANDOFF_POSE_MODEL_PICKER.md) | Qt Model combo; default S; M for hard clips |
 | done | Pose normalizer numerically broken | [AGENT_HANDOFF_VIEWPOINT_ROBUSTNESS.md](./AGENT_HANDOFF_VIEWPOINT_ROBUSTNESS.md) | Aspect + torso scale; Reach max 2.2 on fixture; 4 motif types |

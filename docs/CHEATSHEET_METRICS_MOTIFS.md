@@ -24,10 +24,11 @@ Computed in `compute_metrics` → `MetricPoint`. Energy & speed are **Savitzky�
 
 | Field | Chart label | Formula (plain language) | Unit on chart |
 |-------|-------------|--------------------------|---------------|
-| `energy` | Energy | Sum of `(joint velocity / S)²` over limb joints (`KEY_INDICES`), then ÷ that dancer’s **own peak** | 0–1 relative |
+| `energy` | Energy | Sum of `(joint velocity / S)²` over limb joints, then ÷ that dancer’s **own peak** | 0–1 relative |
+| `energy_abs` | Energy (abs) | Same sum **before** ÷ peak (smoothed) | torso²/s² |
 | `speed` | Speed | Mean `\|v\| / S` over the same joints | torso heights / s |
 | `reach` | Reach | Max distance of head / wrists / ankles from torso centre, ÷ `S` | × torso (guides ~1.2 closed / ~2.5 open) |
-| `level` | Level | Mean `\|ankle_y − hip_y\|` ÷ this track’s **90th-percentile** leg length, clipped to 0–1 | stance ratio (*see note*) |
+| `level` | Level | **Supporting** (lower) ankle vertical drop from hip mid ÷ torso height `S` | drop / torso (not clipped to 1) |
 | `travel` | Travel | Foot-path length over ~**0.8 s** window, ÷ mean `S`, ÷ window seconds | torso heights / s |
 | `directness` | Directness | `net displacement / path length` in that window; **blank (NaN)** if almost still | 0 = winding, 1 = straight |
 | `pos_x` | L–R | Torso COM x in the frame | 0 = left, 1 = right |
@@ -46,8 +47,8 @@ directness = net / path            if path ≥ min threshold, else blank
 
 - Degenerate / missing poses **carry forward** last good reach / level / position (avoids spikes).
 - `enrich_metrics` rebuilds all curves from stored poses when you open an old `.dance.json`.
-- **Level is still** leg-length / p90. A redesign to `(supporting_ankle_y − hip_y) / torso_height` is pending (`AGENT_HANDOFF_LEVEL_DEFINITION.md`).
-- Floor map uses `pos_x` / `pos_y` — **screen coords**, not stage metres.
+- **Level** is hip → supporting ankle / torso (`AGENT_HANDOFF_LEVEL_DEFINITION.md`, shipped in Phase 2).
+- Floor map: **`coco2d`** = screen `pos_*`; **`smpl3d`** = pelvis world XZ solid + supporting-foot XZ dashed (metres, static-cam world — not surveyed stage GPS). See Phase 2 design `2026-10-15-gvhmr-3d-metrics-phase2-design.md`.
 
 ---
 

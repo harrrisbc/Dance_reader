@@ -8,14 +8,19 @@ import numpy as np
 
 from app.jobs import JobStore
 from app.pipeline.gvhmr_run import run_gvhmr_export
-from app.pipeline.metrics import _actor_to_buffer, compute_metrics, enrich_metrics, frame_aspect
+from app.pipeline.metrics import (
+    _actor_to_buffer,
+    compute_metrics,
+    compute_metrics_smpl3d,
+    enrich_metrics,
+    frame_aspect,
+)
 from app.pipeline.motifs import LAST_DETECT_STATS, detect_motif_types
 from app.pipeline.pose_track import (
     DEFAULT_MAX_PEOPLE,
     DEFAULT_MODEL,
     DEFAULT_STRIDE,
     TrackBuffer,
-    TrackedPose,
     load_model,  # kept so tests can assert the YOLO path is not called
     track_video,  # kept so tests can assert the YOLO path is not called
 )
@@ -31,7 +36,7 @@ def _gvhmr_tracks_to_actors(
     *,
     aspect: float,
 ) -> tuple[list[Actor], dict[str, TrackBuffer], dict[int, TrackBuffer]]:
-    """Store SMPL-24 poses. Motif buffers are the COCO-17 bridge."""
+    """Store SMPL-24 poses + joints3d; motif buffers keep 3D (no COCO bridge)."""
     actors: list[Actor] = []
     keyed: dict[str, TrackBuffer] = {}
     buffers: dict[int, TrackBuffer] = {}
@@ -39,35 +44,21 @@ def _gvhmr_tracks_to_actors(
     for tid, track_poses in enumerate(tracks):
         if not track_poses:
             continue
-        raw = TrackBuffer(track_id=tid)
-        for pf in track_poses:
-            raw.poses.append(
-                TrackedPose(
-                    time=float(pf.time),
-                    track_id=tid,
-                    keypoints=np.asarray(pf.keypoints, dtype=np.float32),
-                    xyxy=np.zeros(4, dtype=np.float32),
-                )
-            )
         actor_id = f"track_{tid}"
-        bridged = [
-            PoseFrame(
-                time=p.time,
-                keypoints=[[float(x), float(y), float(c)] for x, y, c in p.keypoints.tolist()],
-            )
-            for p in raw.poses
-        ]
-        coco = _actor_to_buffer(actor_id, bridged)
+        buf = _actor_to_buffer(actor_id, track_poses)
+        if any(p.joints3d is not None for p in buf.poses):
+            metrics = compute_metrics_smpl3d(buf)
+        else:
+            metrics = compute_metrics(buf, aspect=aspect)
         actor = Actor(
             id=actor_id,
             label=_actor_label(idx),
-            metrics=compute_metrics(coco, aspect=aspect),
-            poses=bridged,
+            metrics=metrics,
+            poses=list(track_poses),
         )
-        actor.poses = list(track_poses)
         actors.append(actor)
-        keyed[actor_id] = coco
-        buffers[tid] = coco
+        keyed[actor_id] = buf
+        buffers[tid] = buf
         idx += 1
     return actors, keyed, buffers
 
@@ -138,6 +129,7 @@ def analyze_video(
         ignoredTracks=int(ignored),
         smplSidecar=smpl_sidecar_rel,
         smplSidecarSha256=sidecar_sha,
+        metricsSpace="smpl3d",
     )
     enrich_metrics(result)
 

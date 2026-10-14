@@ -25,7 +25,55 @@ BONE_PAIRS = [
     (12, 14),
     (14, 16),
 ]
+
+# SMPL-24 (gvhmr_world, Y-up) — parallel sets for smpl3d metrics / motif features
+SMPL_PELVIS = 0
+SMPL_L_HIP, SMPL_R_HIP = 1, 2
+SMPL_L_KNEE, SMPL_R_KNEE = 4, 5
+SMPL_L_ANKLE, SMPL_R_ANKLE = 7, 8
+SMPL_HEAD = 15
+SMPL_L_SHOULDER, SMPL_R_SHOULDER = 16, 17
+SMPL_L_ELBOW, SMPL_R_ELBOW = 18, 19
+SMPL_L_WRIST, SMPL_R_WRIST = 20, 21
+SMPL_KEY_INDICES = [
+    SMPL_L_SHOULDER,
+    SMPL_R_SHOULDER,
+    SMPL_L_ELBOW,
+    SMPL_R_ELBOW,
+    SMPL_L_WRIST,
+    SMPL_R_WRIST,
+    SMPL_L_HIP,
+    SMPL_R_HIP,
+    SMPL_L_KNEE,
+    SMPL_R_KNEE,
+    SMPL_L_ANKLE,
+    SMPL_R_ANKLE,
+]
+SMPL_REACH_INDICES = [SMPL_HEAD, SMPL_L_WRIST, SMPL_R_WRIST, SMPL_L_ANKLE, SMPL_R_ANKLE]
+SMPL_MIRROR_PAIRS = [
+    (SMPL_L_HIP, SMPL_R_HIP),
+    (SMPL_L_KNEE, SMPL_R_KNEE),
+    (SMPL_L_ANKLE, SMPL_R_ANKLE),
+    (SMPL_L_SHOULDER, SMPL_R_SHOULDER),
+    (SMPL_L_ELBOW, SMPL_R_ELBOW),
+    (SMPL_L_WRIST, SMPL_R_WRIST),
+]
+SMPL_BONE_PAIRS = [
+    (SMPL_L_SHOULDER, SMPL_L_ELBOW),
+    (SMPL_L_ELBOW, SMPL_L_WRIST),
+    (SMPL_R_SHOULDER, SMPL_R_ELBOW),
+    (SMPL_R_ELBOW, SMPL_R_WRIST),
+    (SMPL_L_HIP, SMPL_L_KNEE),
+    (SMPL_L_KNEE, SMPL_L_ANKLE),
+    (SMPL_R_HIP, SMPL_R_KNEE),
+    (SMPL_R_KNEE, SMPL_R_ANKLE),
+]
 TRAVEL_WINDOW_S = 0.8
+# Level bands from 武拜廟 smpl3d (n=968): bow min 1.22, p50 1.46, standing p75 1.52, max 1.59.
+# No dedicated deep-plié clip — values below the bow trough are "low".
+LEVEL_BAND_LOW = 1.25
+LEVEL_BAND_HIGH = 1.50
+LEVEL_CHART_YLIM = (1.0, 1.75)
 # Below this window path (in torso heights), directness is undefined
 DIRECTNESS_MIN_PATH = 0.08
 # Per-frame torso floor as fraction of track median (prevents near-zero divisors)
@@ -363,7 +411,7 @@ def _foot_y_norm(keypoints: np.ndarray, fallback_y: float) -> float:
 
 
 def _leg_length_sq(sq: np.ndarray, hip_y: float) -> float | None:
-    """Mean |ankle_y - hip_y| in square-pixel space."""
+    """Deprecated alias — use level_stance_ratio_2d. Kept for callers/tests."""
     if sq.shape[0] < 17:
         return None
     lengths: list[float] = []
@@ -377,113 +425,205 @@ def _leg_length_sq(sq: np.ndarray, hip_y: float) -> float | None:
     return float(sum(lengths) / len(lengths))
 
 
-def compute_metrics(
-    buffer: TrackBuffer,
-    *,
-    aspect: float = DEFAULT_ASPECT,
-) -> list[MetricPoint]:
-    poses = buffer.poses
-    if len(poses) < 2:
-        return []
+def level_stance_ratio_2d(sq: np.ndarray, scale: float) -> float | None:
+    """Hip → supporting (lower) ankle vertical drop / torso scale (image Y down)."""
+    if scale <= 1e-6 or sq.shape[0] < 17:
+        return None
+    lh, rh = sq[11], sq[12]
+    if min(float(lh[2]), float(rh[2])) < TORSO_CONF:
+        return None
+    hip_y = 0.5 * (float(lh[1]) + float(rh[1]))
+    ankles: list[float] = []
+    for i in (15, 16):
+        if float(sq[i, 2]) >= TORSO_CONF:
+            ankles.append(float(sq[i, 1]))
+    if not ankles:
+        return None
+    # Supporting = lower in the frame = larger image Y
+    drop = abs(max(ankles) - hip_y)
+    return float(drop / scale)
 
-    scale_ref = track_scale_ref(poses, aspect)
 
-    times: list[float] = []
-    energy_r: list[float] = []
-    speed_th: list[float] = []  # torso heights / second
-    reach_th: list[float] = []  # torso multiples
-    leg_r: list[float] = []
-    pos_xs: list[float] = []  # original normalized (floor map)
-    pos_ys: list[float] = []
+def _joints3d_arr(j: np.ndarray | list) -> np.ndarray | None:
+    a = np.asarray(j, dtype=np.float64)
+    if a.ndim != 2 or a.shape != (24, 3):
+        return None
+    return a
+
+
+def torso_scale_3d(j: np.ndarray) -> float | None:
+    """Shoulder-mid → hip-mid length in metres."""
+    sh = 0.5 * (j[SMPL_L_SHOULDER] + j[SMPL_R_SHOULDER])
+    hip = 0.5 * (j[SMPL_L_HIP] + j[SMPL_R_HIP])
+    s = float(np.linalg.norm(sh - hip))
+    if s < 1e-4:
+        return None
+    return s
+
+
+def track_scale_ref_3d(poses: list[TrackedPose]) -> float:
     scales: list[float] = []
-    valid_flags: list[bool] = []
+    for p in poses:
+        if p.joints3d is None:
+            continue
+        j = _joints3d_arr(p.joints3d)
+        if j is None:
+            continue
+        s = torso_scale_3d(j)
+        if s is not None:
+            scales.append(s)
+    if not scales:
+        return 0.5
+    return float(max(np.median(np.asarray(scales, dtype=np.float64)), 1e-3))
 
-    last_reach = 1.0
-    last_leg: float | None = None
-    last_pos = (0.5, 0.5)
-    last_scale = scale_ref
-    last_speed = 0.0
 
-    for i in range(1, len(poses)):
-        prev = poses[i - 1]
-        cur = poses[i]
-        dt = max(cur.time - prev.time, 1e-3)
+def level_stance_ratio_3d(j: np.ndarray, scale: float) -> float | None:
+    """Y-up: (hip_y − supporting_ankle_y) / S."""
+    if scale <= 1e-6:
+        return None
+    hip_y = 0.5 * (float(j[SMPL_L_HIP, 1]) + float(j[SMPL_R_HIP, 1]))
+    ay_l = float(j[SMPL_L_ANKLE, 1])
+    ay_r = float(j[SMPL_R_ANKLE, 1])
+    supporting_y = min(ay_l, ay_r)
+    drop = hip_y - supporting_y
+    return float(drop / scale)
 
-        cur_sq = to_square_pixels(cur.keypoints, aspect)
 
-        measured = measure_scale(cur.keypoints, aspect=aspect, scale_ref=scale_ref)
-        if measured is None:
-            reach = last_reach
-            leg = last_leg
-            pos_x, pos_y = last_pos
-            scale = last_scale
-            energy, speed_n_out = limb_energy_and_speed(
-                prev.keypoints,
-                cur.keypoints,
-                dt,
-                aspect=aspect,
-                scale=last_scale,
-            )
-            # Carry last speed on fully degenerate frames; keep energy for valleys
-            if last_scale <= 0:
-                speed_n_out = last_speed
-            valid = False
-        else:
-            cx, cy, scale, hip_y = measured
-            reach = _reach_raw(cur_sq, cx, cy, scale)
-            leg = _leg_length_sq(cur_sq, hip_y)
-            # Floor-map positions stay in original normalized coords
-            ls, rs = cur.keypoints[5], cur.keypoints[6]
-            lh, rh = cur.keypoints[11], cur.keypoints[12]
-            pos_x = float((ls[0] + rs[0] + lh[0] + rh[0]) / 4)
-            pos_y = _foot_y_norm(cur.keypoints, float((ls[1] + rs[1] + lh[1] + rh[1]) / 4))
-            energy, speed_n_out = limb_energy_and_speed(
-                prev.keypoints,
-                cur.keypoints,
-                dt,
-                aspect=aspect,
-                scale=scale,
-            )
-            last_reach = reach
-            if leg is not None:
-                last_leg = leg
-            last_pos = (pos_x, pos_y)
-            last_scale = scale
-            last_speed = speed_n_out
-            valid = True
-
-        times.append(cur.time)
-        energy_r.append(float(energy))
-        speed_th.append(float(speed_n_out))
-        reach_th.append(float(reach))
-        leg_r.append(float(leg) if leg is not None else float("nan"))
-        pos_xs.append(float(np.clip(pos_x, 0.0, 1.0)))
-        pos_ys.append(float(np.clip(pos_y, 0.0, 1.0)))
-        scales.append(float(max(scale, 1e-3)))
-        valid_flags.append(valid)
-
-    fps = estimate_fps(times)
-    energy_r = smooth_series(energy_r, fps=fps).tolist()
-    speed_th = smooth_series(speed_th, fps=fps).tolist()
-
-    valid_legs = [v for v in leg_r if not math.isnan(v)]
-    if valid_legs:
-        leg_ref = float(np.percentile(np.asarray(valid_legs, dtype=np.float64), 90))
-        leg_ref = max(leg_ref, 1e-4)
+def supporting_ankle_xz(j: np.ndarray) -> tuple[float, float]:
+    """World XZ of the lower ankle (Y-up)."""
+    if float(j[SMPL_L_ANKLE, 1]) <= float(j[SMPL_R_ANKLE, 1]):
+        a = j[SMPL_L_ANKLE]
     else:
-        leg_ref = 1.0
+        a = j[SMPL_R_ANKLE]
+    return float(a[0]), float(a[2])
 
-    level_n: list[float] = []
-    last_level = 1.0
-    for v in leg_r:
-        if math.isnan(v):
-            level_n.append(last_level)
+
+def mirror_joints3d(j: np.ndarray) -> np.ndarray:
+    """Reflect across vertical plane through pelvis; swap L/R."""
+    out = np.asarray(j, dtype=np.float64).copy()
+    cx = float(out[SMPL_PELVIS, 0])
+    out[:, 0] = (2.0 * cx) - out[:, 0]
+    for a, b in SMPL_MIRROR_PAIRS:
+        tmp = out[a].copy()
+        out[a] = out[b]
+        out[b] = tmp
+    return out
+
+
+def limb_energy_and_speed_3d(
+    prev_j: np.ndarray,
+    cur_j: np.ndarray,
+    dt: float,
+    *,
+    scale: float,
+) -> tuple[float, float]:
+    if scale <= 1e-6 or dt <= 1e-6:
+        return 0.0, 0.0
+    energy = 0.0
+    speed_sum = 0.0
+    n = 0
+    for i in SMPL_KEY_INDICES:
+        v = float(np.linalg.norm(cur_j[i] - prev_j[i]) / dt)
+        v_n = v / scale
+        energy += v_n * v_n
+        speed_sum += v_n
+        n += 1
+    speed = speed_sum / n if n else 0.0
+    return float(energy), float(speed)
+
+
+def _reach_raw_3d(j: np.ndarray, centre: np.ndarray, scale: float) -> float:
+    best = 0.0
+    for i in SMPL_REACH_INDICES:
+        d = float(np.linalg.norm(j[i] - centre)) / scale
+        best = max(best, d)
+    return best
+
+
+def pose_feature_3d(
+    joints: np.ndarray,
+    *,
+    scale_ref: float | None = None,
+) -> tuple[np.ndarray, np.ndarray] | None:
+    """Torso-normalized XYZ for SMPL_KEY_INDICES + visibility (always True if finite)."""
+    j = _joints3d_arr(joints)
+    if j is None:
+        return None
+    s = torso_scale_3d(j)
+    if s is None:
+        return None
+    if scale_ref is not None and scale_ref > 0:
+        s = max(s, SCALE_FLOOR_FRAC * float(scale_ref))
+    centre = 0.25 * (
+        j[SMPL_L_SHOULDER] + j[SMPL_R_SHOULDER] + j[SMPL_L_HIP] + j[SMPL_R_HIP]
+    )
+    feats: list[float] = []
+    mask: list[bool] = []
+    for i in SMPL_KEY_INDICES:
+        rel = (j[i] - centre) / s
+        if not np.all(np.isfinite(rel)):
+            feats.extend([0.0, 0.0, 0.0])
+            mask.extend([False, False, False])
         else:
-            lv = float(np.clip(v / leg_ref, 0.0, 1.0))
-            last_level = lv
-            level_n.append(lv)
+            feats.extend([float(rel[0]), float(rel[1]), float(rel[2])])
+            mask.extend([True, True, True])
+    return (
+        np.asarray(feats, dtype=np.float32),
+        np.asarray(mask, dtype=bool),
+    )
 
-    # Travel / directness on foot track — path in square-pixel space
+
+def pose_feature_rich_3d(
+    joints: np.ndarray,
+    *,
+    scale_ref: float | None = None,
+) -> tuple[np.ndarray, np.ndarray] | None:
+    base = pose_feature_3d(joints, scale_ref=scale_ref)
+    if base is None:
+        return None
+    base_feat, base_mask = base
+    j = _joints3d_arr(joints)
+    assert j is not None
+    s = torso_scale_3d(j)
+    if s is None:
+        return None
+    if scale_ref is not None and scale_ref > 0:
+        s = max(s, SCALE_FLOOR_FRAC * float(scale_ref))
+    bones: list[float] = []
+    bone_mask: list[bool] = []
+    for a, b in SMPL_BONE_PAIRS:
+        d = j[b] - j[a]
+        n = float(np.linalg.norm(d)) or 1.0
+        u = d / n
+        bones.extend([float(u[0]), float(u[1]), float(u[2])])
+        bone_mask.extend([True, True, True])
+    return (
+        np.concatenate([base_feat, np.asarray(bones, dtype=np.float32)]),
+        np.concatenate([base_mask, np.asarray(bone_mask, dtype=bool)]),
+    )
+
+
+def pose_feature_rich_3d_mirrored(
+    joints: np.ndarray,
+    *,
+    scale_ref: float | None = None,
+) -> tuple[np.ndarray, np.ndarray] | None:
+    j = _joints3d_arr(joints)
+    if j is None:
+        return None
+    return pose_feature_rich_3d(mirror_joints3d(j), scale_ref=scale_ref)
+
+
+def _travel_directness_series(
+    times: list[float],
+    xs: list[float],
+    zs: list[float],
+    scales: list[float],
+    scale_ref: float,
+    *,
+    x_scale: float = 1.0,
+) -> tuple[list[float], list[float]]:
+    """Rolling path travel (torso/s) and directness on a 2D ground track."""
     travel_th_s: list[float] = []
     direct_r: list[float] = []
     for i, t in enumerate(times):
@@ -493,15 +633,11 @@ def compute_metrics(
             j0 -= 1
         path = 0.0
         for k in range(j0 + 1, i + 1):
-            # pos stored normalized; convert delta x by aspect for path length
-            dx = (pos_xs[k] - pos_xs[k - 1]) * aspect
-            dy = pos_ys[k] - pos_ys[k - 1]
-            path += float(np.hypot(dx, dy))
+            dx = (xs[k] - xs[k - 1]) * x_scale
+            dz = zs[k] - zs[k - 1]
+            path += float(np.hypot(dx, dz))
         net = float(
-            np.hypot(
-                (pos_xs[i] - pos_xs[j0]) * aspect,
-                pos_ys[i] - pos_ys[j0],
-            )
+            np.hypot((xs[i] - xs[j0]) * x_scale, zs[i] - zs[j0])
         )
         win_scale = float(np.mean(scales[j0 : i + 1])) if i >= j0 else scales[i]
         win_scale = max(win_scale, SCALE_FLOOR_FRAC * scale_ref, 1e-3)
@@ -512,18 +648,119 @@ def compute_metrics(
             direct_r.append(float("nan"))
         else:
             direct_r.append(float(np.clip(net / path, 0.0, 1.0)))
+    return travel_th_s, direct_r
 
+
+def compute_metrics(
+    buffer: TrackBuffer,
+    *,
+    aspect: float = DEFAULT_ASPECT,
+) -> list[MetricPoint]:
+    """2D / coco2d metrics from image keypoints."""
+    poses = buffer.poses
+    if len(poses) < 2:
+        return []
+
+    scale_ref = track_scale_ref(poses, aspect)
+
+    times: list[float] = []
+    energy_r: list[float] = []
+    speed_th: list[float] = []
+    reach_th: list[float] = []
+    level_n: list[float] = []
+    pos_xs: list[float] = []
+    pos_ys: list[float] = []
+    pos_foot_xs: list[float] = []
+    pos_foot_ys: list[float] = []
+    scales: list[float] = []
+
+    last_reach = 1.0
+    last_level = 1.0
+    last_pos = (0.5, 0.5)
+    last_foot = (0.5, 0.5)
+    last_scale = scale_ref
+    last_speed = 0.0
+
+    for i in range(1, len(poses)):
+        prev = poses[i - 1]
+        cur = poses[i]
+        dt = max(cur.time - prev.time, 1e-3)
+        cur_sq = to_square_pixels(cur.keypoints, aspect)
+        measured = measure_scale(cur.keypoints, aspect=aspect, scale_ref=scale_ref)
+        if measured is None:
+            reach = last_reach
+            level = last_level
+            pos_x, pos_y = last_pos
+            foot_x, foot_y = last_foot
+            scale = last_scale
+            energy, speed_n_out = limb_energy_and_speed(
+                prev.keypoints, cur.keypoints, dt, aspect=aspect, scale=last_scale
+            )
+            if last_scale <= 0:
+                speed_n_out = last_speed
+        else:
+            cx, cy, scale, _hip = measured
+            reach = _reach_raw(cur_sq, cx, cy, scale)
+            lv = level_stance_ratio_2d(cur_sq, scale)
+            level = float(lv) if lv is not None else last_level
+            ls, rs = cur.keypoints[5], cur.keypoints[6]
+            lh, rh = cur.keypoints[11], cur.keypoints[12]
+            pos_x = float((ls[0] + rs[0] + lh[0] + rh[0]) / 4)
+            pos_y = _foot_y_norm(
+                cur.keypoints, float((ls[1] + rs[1] + lh[1] + rh[1]) / 4)
+            )
+            foot_x, foot_y = pos_x, pos_y
+            ank: list[tuple[float, float, float]] = []
+            for ai in (15, 16):
+                if float(cur.keypoints[ai, 2]) >= TORSO_CONF:
+                    ank.append(
+                        (
+                            float(cur.keypoints[ai, 0]),
+                            float(cur.keypoints[ai, 1]),
+                            float(cur.keypoints[ai, 2]),
+                        )
+                    )
+            if ank:
+                ank.sort(key=lambda t: (t[1], t[2]))
+                foot_x, foot_y = ank[-1][0], ank[-1][1]
+            energy, speed_n_out = limb_energy_and_speed(
+                prev.keypoints, cur.keypoints, dt, aspect=aspect, scale=scale
+            )
+            last_reach = reach
+            last_level = level
+            last_pos = (pos_x, pos_y)
+            last_foot = (foot_x, foot_y)
+            last_scale = scale
+            last_speed = speed_n_out
+
+        times.append(cur.time)
+        energy_r.append(float(energy))
+        speed_th.append(float(speed_n_out))
+        reach_th.append(float(reach))
+        level_n.append(float(level))
+        pos_xs.append(float(np.clip(pos_x, 0.0, 1.0)))
+        pos_ys.append(float(np.clip(pos_y, 0.0, 1.0)))
+        pos_foot_xs.append(float(np.clip(foot_x, 0.0, 1.0)))
+        pos_foot_ys.append(float(np.clip(foot_y, 0.0, 1.0)))
+        scales.append(float(max(scale, 1e-3)))
+
+    fps = estimate_fps(times)
+    energy_r = smooth_series(energy_r, fps=fps).tolist()
+    speed_th = smooth_series(speed_th, fps=fps).tolist()
+    travel_th_s, direct_r = _travel_directness_series(
+        times, pos_xs, pos_ys, scales, scale_ref, x_scale=aspect
+    )
     e_max = max(energy_r) if energy_r else 0.0
-    if e_max <= 1e-9:
-        energy_n = [0.0] * len(energy_r)
-    else:
-        # Peak-relative for display; absolute (torso²/s²) available before this step
-        energy_n = [float(v / e_max) for v in energy_r]
-
+    energy_n = (
+        [0.0] * len(energy_r)
+        if e_max <= 1e-9
+        else [float(v / e_max) for v in energy_r]
+    )
     return [
         MetricPoint(
             time=times[i],
             energy=energy_n[i],
+            energy_abs=float(energy_r[i]),
             speed=speed_th[i],
             reach=reach_th[i],
             level=level_n[i],
@@ -531,9 +768,136 @@ def compute_metrics(
             directness=direct_r[i],
             pos_x=pos_xs[i],
             pos_y=pos_ys[i],
+            pos_foot_x=pos_foot_xs[i],
+            pos_foot_y=pos_foot_ys[i],
         )
         for i in range(len(times))
     ]
+
+
+def compute_metrics_smpl3d(buffer: TrackBuffer) -> list[MetricPoint]:
+    """World-metre metrics from TrackedPose.joints3d (Y-up gvhmr_world)."""
+    poses = [p for p in buffer.poses if p.joints3d is not None]
+    if len(poses) < 2:
+        return []
+
+    scale_ref = track_scale_ref_3d(poses)
+    times: list[float] = []
+    energy_r: list[float] = []
+    speed_th: list[float] = []
+    reach_th: list[float] = []
+    level_n: list[float] = []
+    pos_xs: list[float] = []
+    pos_ys: list[float] = []
+    pos_foot_xs: list[float] = []
+    pos_foot_ys: list[float] = []
+    scales: list[float] = []
+
+    last_reach = 1.0
+    last_level = 1.0
+    last_pos = (0.0, 0.0)
+    last_foot = (0.0, 0.0)
+    last_scale = scale_ref
+    last_speed = 0.0
+
+    for i in range(1, len(poses)):
+        prev, cur = poses[i - 1], poses[i]
+        dt = max(cur.time - prev.time, 1e-3)
+        prev_j = _joints3d_arr(prev.joints3d)
+        cur_j = _joints3d_arr(cur.joints3d)
+        if prev_j is None or cur_j is None:
+            continue
+        s = torso_scale_3d(cur_j)
+        if s is None:
+            scale = last_scale
+            reach = last_reach
+            level = last_level
+            px, pz = last_pos
+            fx, fz = last_foot
+            energy, speed_n_out = limb_energy_and_speed_3d(
+                prev_j, cur_j, dt, scale=last_scale
+            )
+            if last_scale <= 0:
+                speed_n_out = last_speed
+        else:
+            scale = max(s, SCALE_FLOOR_FRAC * scale_ref)
+            centre = 0.25 * (
+                cur_j[SMPL_L_SHOULDER]
+                + cur_j[SMPL_R_SHOULDER]
+                + cur_j[SMPL_L_HIP]
+                + cur_j[SMPL_R_HIP]
+            )
+            reach = _reach_raw_3d(cur_j, centre, scale)
+            lv = level_stance_ratio_3d(cur_j, scale)
+            level = float(lv) if lv is not None else last_level
+            px = float(cur_j[SMPL_PELVIS, 0])
+            pz = float(cur_j[SMPL_PELVIS, 2])
+            fx, fz = supporting_ankle_xz(cur_j)
+            energy, speed_n_out = limb_energy_and_speed_3d(
+                prev_j, cur_j, dt, scale=scale
+            )
+            last_reach = reach
+            last_level = level
+            last_pos = (px, pz)
+            last_foot = (fx, fz)
+            last_scale = scale
+            last_speed = speed_n_out
+
+        times.append(cur.time)
+        energy_r.append(float(energy))
+        speed_th.append(float(speed_n_out))
+        reach_th.append(float(reach))
+        level_n.append(float(level))
+        pos_xs.append(float(px))
+        pos_ys.append(float(pz))
+        pos_foot_xs.append(float(fx))
+        pos_foot_ys.append(float(fz))
+        scales.append(float(max(scale, 1e-3)))
+
+    if len(times) < 1:
+        return []
+
+    fps = estimate_fps(times)
+    energy_r = smooth_series(energy_r, fps=fps).tolist()
+    speed_th = smooth_series(speed_th, fps=fps).tolist()
+    travel_th_s, direct_r = _travel_directness_series(
+        times, pos_xs, pos_ys, scales, scale_ref, x_scale=1.0
+    )
+    # Floor origin = first pelvis so the map starts at (0, 0). Deltas unchanged.
+    ox, oz = pos_xs[0], pos_ys[0]
+    pos_xs = [x - ox for x in pos_xs]
+    pos_ys = [z - oz for z in pos_ys]
+    pos_foot_xs = [x - ox for x in pos_foot_xs]
+    pos_foot_ys = [z - oz for z in pos_foot_ys]
+    e_max = max(energy_r) if energy_r else 0.0
+    energy_n = (
+        [0.0] * len(energy_r)
+        if e_max <= 1e-9
+        else [float(v / e_max) for v in energy_r]
+    )
+    return [
+        MetricPoint(
+            time=times[i],
+            energy=energy_n[i],
+            energy_abs=float(energy_r[i]),
+            speed=speed_th[i],
+            reach=reach_th[i],
+            level=level_n[i],
+            travel=travel_th_s[i],
+            directness=direct_r[i],
+            pos_x=pos_xs[i],
+            pos_y=pos_ys[i],
+            pos_foot_x=pos_foot_xs[i],
+            pos_foot_y=pos_foot_ys[i],
+        )
+        for i in range(len(times))
+    ]
+
+
+def actor_has_joints3d(poses: list[PoseFrame]) -> bool:
+    return any(
+        p.joints3d is not None and len(p.joints3d) == 24 for p in poses
+    )
 
 
 def _actor_to_buffer(actor_id: str, poses: list[PoseFrame]) -> TrackBuffer:
@@ -550,7 +914,11 @@ def _actor_to_buffer(actor_id: str, poses: list[PoseFrame]) -> TrackBuffer:
             continue
         if kpts.shape[1] > 3:
             kpts = kpts[:, :3]
-        if kpts.shape[0] == 24:
+        j3d = None
+        if pf.joints3d is not None and len(pf.joints3d) == 24:
+            j3d = np.asarray(pf.joints3d, dtype=np.float32)
+        elif kpts.shape[0] == 24:
+            # Legacy 24-point without joints3d: bridge for coco2d only
             kpts = np.asarray(smpl_keypoints_to_coco17(kpts.tolist()), dtype=np.float32)
         buf.poses.append(
             TrackedPose(
@@ -558,19 +926,26 @@ def _actor_to_buffer(actor_id: str, poses: list[PoseFrame]) -> TrackBuffer:
                 track_id=tid,
                 keypoints=kpts,
                 xyxy=np.zeros(4, dtype=np.float32),
+                joints3d=j3d,
             )
         )
     return buf
 
 
 def enrich_metrics(result: AnalysisResult) -> AnalysisResult:
-    """Recompute all metrics (incl. space + position) from stored poses. Mutates actors."""
+    """Recompute all metrics from stored poses. Sets metricsSpace. Mutates actors."""
     aspect = frame_aspect(int(result.frame_width or 0), int(result.frame_height or 0))
+    any_3d = False
     for actor in result.actors:
         if not actor.poses:
             continue
         buf = _actor_to_buffer(actor.id, actor.poses)
         if len(buf.poses) < 2:
             continue
-        actor.metrics = compute_metrics(buf, aspect=aspect)
+        if actor_has_joints3d(actor.poses):
+            any_3d = True
+            actor.metrics = compute_metrics_smpl3d(buf)
+        else:
+            actor.metrics = compute_metrics(buf, aspect=aspect)
+    result.metricsSpace = "smpl3d" if any_3d else "coco2d"
     return result

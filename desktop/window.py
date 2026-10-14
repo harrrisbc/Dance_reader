@@ -30,7 +30,12 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from app.pipeline.metrics import frame_aspect
+from app.pipeline.metrics import (
+    LEVEL_BAND_HIGH,
+    LEVEL_BAND_LOW,
+    LEVEL_CHART_YLIM,
+    frame_aspect,
+)
 from app.pipeline.motifs import (
     LAST_DETECT_STATS,
     SUBSEQ_MATCH_MAX_DIST,
@@ -91,9 +96,10 @@ def format_time_readout(current_s: float, duration_s: float) -> str:
 # kind: area | line | level | travel | ribbon | pos
 CHART_SERIES = (
     ("energy", "Energy", "#4aa3ff", True, "area", "rel. peak", (0.0, 1.0)),
+    ("energy_abs", "Energy (abs)", "#2f6fbf", False, "line", "torso²/s²", (0.0, 40.0)),
     ("speed", "Speed", "#f0a040", True, "line", "torso/s", (0.0, 7.0)),
     ("reach", "Reach", "#78b4a0", True, "reach", "× torso", (0.5, 4.0)),
-    ("level", "Level", "#c45c4a", False, "level", "stance ratio", (0.0, 1.05)),
+    ("level", "Level", "#c45c4a", False, "level", "drop / torso", LEVEL_CHART_YLIM),
     ("travel", "Travel", "#e8c56e", False, "area", "torso/s", (0.0, 2.5)),
     ("directness", "Directness", "#a67c52", False, "ribbon", "", (0.0, 1.0)),
     ("pos_x", "L–R", "#8f7cc0", False, "pos", "screen", (0.0, 1.0)),
@@ -337,10 +343,11 @@ class MainWindow(QMainWindow):
         self.mesh_view.setMinimumWidth(280)
         self.mesh_view.hide()
 
-        self.floor_toggle = QCheckBox("Floor map (screen coords)")
+        self.floor_toggle = QCheckBox("Floor map")
         self.floor_toggle.setChecked(True)
         self.floor_toggle.setToolTip(
-            "Screen coordinates, not true stage space. Best with a fixed camera; pan/zoom distorts."
+            "coco2d: screen coords. smpl3d: world XZ metres (pelvis solid, supporting foot dashed), "
+            "origin = first pelvis. Static-cam / clip-relative, not surveyed stage GPS."
         )
         self.floor_toggle.stateChanged.connect(self._on_floor_toggle)
 
@@ -1341,10 +1348,12 @@ class MainWindow(QMainWindow):
                 clip_on=False,
             )
         elif kind == "level":
-            ax.axhspan(0.0, 0.45, color="#c45c4a", alpha=0.08, zorder=0)
-            ax.axhspan(0.45, 0.8, color="#e8c56e", alpha=0.08, zorder=0)
-            ax.axhspan(0.8, 1.05, color="#78b4a0", alpha=0.08, zorder=0)
+            ax.axhspan(y0, LEVEL_BAND_LOW, color="#c45c4a", alpha=0.10, zorder=0)
+            ax.axhspan(LEVEL_BAND_LOW, LEVEL_BAND_HIGH, color="#e8c56e", alpha=0.10, zorder=0)
+            ax.axhspan(LEVEL_BAND_HIGH, y1, color="#78b4a0", alpha=0.10, zorder=0)
             ax.plot(times, ys, color=color, linewidth=1.3)
+            ax.text(self.view_end, LEVEL_BAND_LOW, " low", va="bottom", ha="right", fontsize=7, color="#666666")
+            ax.text(self.view_end, LEVEL_BAND_HIGH, " high", va="bottom", ha="right", fontsize=7, color="#666666")
         elif kind == "ribbon":
             # Color by directness; gaps (NaN) where dancer is still
             ax.set_yticks([])
@@ -1411,11 +1420,25 @@ class MainWindow(QMainWindow):
         times = [m.time for m in actor.metrics]
         t_now = self.current_time()
 
+        space = getattr(self.analysis, "metricsSpace", "coco2d") if self.analysis else "coco2d"
         for i, (attr, label, color, _on, kind, ylabel, ylim) in enumerate(enabled):
             ax = axes[i]
             ys = [float(getattr(m, attr, 0.0)) for m in actor.metrics]
+            row_ylabel, row_ylim = ylabel, ylim
+            if space == "smpl3d" and attr in ("pos_x", "pos_y"):
+                row_ylabel = "m (world)"
+                if ys:
+                    lo, hi = min(ys), max(ys)
+                    pad = max(0.1 * (hi - lo), 0.2)
+                    row_ylim = (lo - pad, hi + pad)
             self._plot_series_row(
-                ax, times, ys, kind=kind, color=color, ylabel=ylabel or label, ylim=ylim
+                ax,
+                times,
+                ys,
+                kind=kind,
+                color=color,
+                ylabel=row_ylabel or label,
+                ylim=row_ylim,
             )
             ax.set_xlim(self.view_start, self.view_end)
             ax.tick_params(axis="y", labelsize=7)
@@ -1459,9 +1482,14 @@ class MainWindow(QMainWindow):
             self.floor_canvas.draw_idle()
             return
 
+        space = (
+            getattr(self.analysis, "metricsSpace", "coco2d") if self.analysis else "coco2d"
+        )
+        world = space == "smpl3d"
+
         # Points inside current zoom window
         pts = [
-            (m.pos_x, m.pos_y, m.time)
+            (m.pos_x, m.pos_y, m.time, m.pos_foot_x, m.pos_foot_y)
             for m in actor.metrics
             if self.view_start <= m.time <= self.view_end
         ]
@@ -1473,11 +1501,13 @@ class MainWindow(QMainWindow):
 
         xs = [p[0] for p in pts]
         ys = [p[1] for p in pts]
+        fxs = [p[3] for p in pts]
+        fys = [p[4] for p in pts]
         ts = [p[2] for p in pts]
         t0, t1 = ts[0], ts[-1]
         span = max(t1 - t0, 1e-6)
 
-        # Time-colored segments: light → dark
+        # Time-colored pelvis path (solid)
         for i in range(1, len(pts)):
             u = ((ts[i - 1] + ts[i]) * 0.5 - t0) / span
             g = int(216 + (51 - 216) * u)
@@ -1488,28 +1518,68 @@ class MainWindow(QMainWindow):
                 color=col,
                 linewidth=2.0,
                 solid_capstyle="round",
+                linestyle="-",
+            )
+        if world:
+            ax.plot(
+                fxs,
+                fys,
+                color="#888888",
+                linewidth=1.2,
+                linestyle="--",
             )
 
-        # Playhead position
         t_now = self.current_time()
         best = min(pts, key=lambda p: abs(p[2] - t_now))
         self._floor_playhead = ax.scatter(
-            [best[0]], [best[1]], c="#c45c4a", s=48, zorder=5, edgecolors="white", linewidths=0.6
+            [best[0]],
+            [best[1]],
+            c="#c45c4a",
+            s=48,
+            zorder=5,
+            edgecolors="white",
+            linewidths=0.6,
         )
 
-        # Aspect from analysis frame size (fallback 16:9)
-        fw = int(self.analysis.frame_width) if self.analysis else 0
-        fh = int(self.analysis.frame_height) if self.analysis else 0
-        if fw <= 0 or fh <= 0:
-            fw, fh = 16, 9
-        ax.set_xlim(0, 1)
-        ax.set_ylim(0, 1)
-        ax.invert_yaxis()  # image y: 0 = top/far at top of plot
-        ax.set_box_aspect(fh / float(fw))
+        if world:
+            # Extra X pad so a mostly N–S path is not a hairline strip under labels.
+            pad_y = 0.12
+            all_x = xs + fxs
+            all_y = ys + fys
+            xmin, xmax = min(all_x), max(all_x)
+            ymin, ymax = min(all_y), max(all_y)
+            span_x = max(xmax - xmin, 1e-3)
+            span_y = max(ymax - ymin, 1e-3)
+            # Match at least ~35% of Z span on X so the panel stays readable.
+            min_x_span = max(0.35 * span_y, 0.8)
+            if span_x < min_x_span:
+                mid = 0.5 * (xmin + xmax)
+                xmin, xmax = mid - 0.5 * min_x_span, mid + 0.5 * min_x_span
+                span_x = min_x_span
+            ax.set_xlim(xmin - 0.08 * span_x, xmax + 0.08 * span_x)
+            ax.set_ylim(ymin - pad_y * span_y, ymax + pad_y * span_y)
+            ax.set_aspect("equal", adjustable="datalim")
+            ax.set_xlabel("world X (m)", fontsize=8)
+            ax.set_ylabel("world Z (m)", fontsize=8)
+            # Key in title — legend boxes cover narrow equal-aspect trails.
+            ax.set_title(
+                "Floor map — solid pelvis · dashed foot (m, static cam)",
+                fontsize=8,
+            )
+            ax.tick_params(labelsize=7)
+        else:
+            fw = int(self.analysis.frame_width) if self.analysis else 0
+            fh = int(self.analysis.frame_height) if self.analysis else 0
+            if fw <= 0 or fh <= 0:
+                fw, fh = 16, 9
+            ax.set_xlim(0, 1)
+            ax.set_ylim(0, 1)
+            ax.invert_yaxis()
+            ax.set_box_aspect(fh / float(fw))
+            ax.set_xticks([])
+            ax.set_yticks([])
+            ax.set_title("Floor map (screen coords)", fontsize=9)
 
-        ax.set_xticks([])
-        ax.set_yticks([])
-        ax.set_title("Floor map (screen coords)", fontsize=9)
         for spine in ax.spines.values():
             spine.set_color("#aaaaaa")
         self.floor_fig.tight_layout()

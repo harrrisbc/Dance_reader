@@ -68,8 +68,9 @@ def resolve_pose_model(model: str | None) -> str:
 class TrackedPose:
     time: float
     track_id: int
-    keypoints: np.ndarray  # (17, 3) x,y normalized, conf
+    keypoints: np.ndarray  # (17 or 24, 3) x,y normalized, conf
     xyxy: np.ndarray  # pixel box
+    joints3d: np.ndarray | None = None  # (24, 3) metres gvhmr_world when present
 
 
 @dataclass

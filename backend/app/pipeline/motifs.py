@@ -9,14 +9,20 @@ from sklearn.cluster import AgglomerativeClustering
 from app.pipeline.metrics import (
     DEFAULT_ASPECT,
     KEY_INDICES,
+    SMPL_KEY_INDICES,
     estimate_fps,
     limb_energy_and_speed,
+    limb_energy_and_speed_3d,
     measure_scale,
     pose_feature_rich,
+    pose_feature_rich_3d,
+    pose_feature_rich_3d_mirrored,
     pose_feature_rich_mirrored,
     smooth_series,
     to_square_pixels,
     track_scale_ref,
+    track_scale_ref_3d,
+    torso_scale_3d,
 )
 from app.pipeline.pose_track import TrackBuffer
 from app.schemas import MotifOccurrence, MotifType
@@ -78,6 +84,23 @@ DEGENERATE_FRAME_FRAC = 0.35
 # Mask-aware DTW: below this shared KEY_INDICES joint count, impute ≥ median cost
 MIN_SHARED_VISIBLE_JOINTS = 4
 N_XY_DIMS = len(KEY_INDICES) * 2
+N_XYZ_DIMS = len(SMPL_KEY_INDICES) * 3
+
+
+def _pose_has_joints3d(pose) -> bool:
+    j = getattr(pose, "joints3d", None)
+    return j is not None and np.asarray(j).shape == (24, 3)
+
+
+def _buffer_has_joints3d(poses: list) -> bool:
+    return any(_pose_has_joints3d(p) for p in poses)
+
+
+def _prefilter_pos_dims(feat_dim: int) -> int:
+    """How many leading dims are joint positions (2D XY or 3D XYZ)."""
+    if feat_dim >= N_XYZ_DIMS and (feat_dim - N_XYZ_DIMS) % 3 == 0:
+        return N_XYZ_DIMS
+    return min(N_XY_DIMS, feat_dim)
 # Cosine-reject sentinel for clustering matrix (must exceed any real DTW)
 COSINE_REJECT_DIST = 1e3
 
@@ -277,14 +300,24 @@ def _sample_sequence(
     masks: list[np.ndarray] = []
     feat_dim: int | None = None
     missing = 0
+    use_3d = _buffer_has_joints3d(poses)
+    scale_ref_3d = track_scale_ref_3d(poses) if use_3d else None
     for pi in pick:
         i = int(idxs[int(pi)])
-        k = poses[i].keypoints
-        packed = (
-            pose_feature_rich_mirrored(k, aspect=_CTX_ASPECT, scale_ref=scale_ref)
-            if mirrored
-            else pose_feature_rich(k, aspect=_CTX_ASPECT, scale_ref=scale_ref)
-        )
+        pose = poses[i]
+        if use_3d and _pose_has_joints3d(pose):
+            packed = (
+                pose_feature_rich_3d_mirrored(pose.joints3d, scale_ref=scale_ref_3d)
+                if mirrored
+                else pose_feature_rich_3d(pose.joints3d, scale_ref=scale_ref_3d)
+            )
+        else:
+            k = pose.keypoints
+            packed = (
+                pose_feature_rich_mirrored(k, aspect=_CTX_ASPECT, scale_ref=scale_ref)
+                if mirrored
+                else pose_feature_rich(k, aspect=_CTX_ASPECT, scale_ref=scale_ref)
+            )
         if packed is None:
             missing += 1
             if feat_dim is None:
@@ -319,11 +352,12 @@ def _trajectory_embedding(seq: np.ndarray, mask: np.ndarray | None = None) -> np
     for pi in pick:
         idx = int(pi)
         f = seq[idx]
-        # Use only first KEY_INDICES*2 dims (XY) for compact cosine prefilter
-        xy = f[:N_XY_DIMS].copy()
+        n_pos = _prefilter_pos_dims(int(f.shape[0]))
+        # Leading joint-position dims for compact cosine prefilter
+        xy = f[:n_pos].copy()
         if mask is not None:
             # Occluded dims stay 0 — never fabricate torso-centre as visible pose
-            m = mask[idx][:N_XY_DIMS]
+            m = mask[idx][:n_pos]
             xy = np.where(m, xy, 0.0)
         if prev is None:
             vel = np.zeros_like(xy)
@@ -336,11 +370,22 @@ def _trajectory_embedding(seq: np.ndarray, mask: np.ndarray | None = None) -> np
 
 
 def _shared_visible_joints(mask_a: np.ndarray, mask_b: np.ndarray) -> int:
-    """Count KEY_INDICES joints whose XY dims are visible in both frames."""
+    """Count joints whose position dims are visible in both frames."""
     n = 0
-    lim = min(N_XY_DIMS, len(mask_a), len(mask_b))
-    for k in range(0, lim, 2):
-        if (
+    step = 3 if len(mask_a) >= N_XYZ_DIMS else 2
+    lim = min(_prefilter_pos_dims(len(mask_a)), len(mask_a), len(mask_b))
+    for k in range(0, lim - (step - 1), step):
+        if step == 3:
+            if (
+                bool(mask_a[k])
+                and bool(mask_a[k + 1])
+                and bool(mask_a[k + 2])
+                and bool(mask_b[k])
+                and bool(mask_b[k + 1])
+                and bool(mask_b[k + 2])
+            ):
+                n += 1
+        elif (
             bool(mask_a[k])
             and bool(mask_a[k + 1])
             and bool(mask_b[k])
@@ -579,29 +624,44 @@ def segment_similarity(a: Segment, b: Segment) -> float:
 
 def _energy_series(poses: list) -> tuple[np.ndarray, np.ndarray]:
     """
-    Scale-normalized energy (KEY_INDICES), Savitzky–Golay smoothed — same recipe
+    Scale-normalized energy, Savitzky–Golay smoothed — same recipe
     as displayed Energy before peak-normalization.
     """
     if len(poses) < 2:
         return np.array([]), np.array([])
-    scale_ref = track_scale_ref(poses, _CTX_ASPECT)
+    use_3d = _buffer_has_joints3d(poses)
+    if use_3d:
+        scale_ref = track_scale_ref_3d(poses)
+    else:
+        scale_ref = track_scale_ref(poses, _CTX_ASPECT)
     times: list[float] = []
     energy: list[float] = []
     last_scale = scale_ref
     for i in range(1, len(poses)):
         prev, cur = poses[i - 1], poses[i]
-        measured = measure_scale(
-            cur.keypoints, aspect=_CTX_ASPECT, scale_ref=scale_ref
-        )
-        scale = measured[2] if measured is not None else last_scale
-        last_scale = scale
-        e, _s = limb_energy_and_speed(
-            prev.keypoints,
-            cur.keypoints,
-            cur.time - prev.time,
-            aspect=_CTX_ASPECT,
-            scale=scale,
-        )
+        if use_3d and _pose_has_joints3d(prev) and _pose_has_joints3d(cur):
+            s = torso_scale_3d(np.asarray(cur.joints3d, dtype=np.float64))
+            scale = s if s is not None else last_scale
+            last_scale = scale
+            e, _s = limb_energy_and_speed_3d(
+                np.asarray(prev.joints3d, dtype=np.float64),
+                np.asarray(cur.joints3d, dtype=np.float64),
+                cur.time - prev.time,
+                scale=scale,
+            )
+        else:
+            measured = measure_scale(
+                cur.keypoints, aspect=_CTX_ASPECT, scale_ref=scale_ref
+            )
+            scale = measured[2] if measured is not None else last_scale
+            last_scale = scale
+            e, _s = limb_energy_and_speed(
+                prev.keypoints,
+                cur.keypoints,
+                cur.time - prev.time,
+                aspect=_CTX_ASPECT,
+                scale=scale,
+            )
         times.append(cur.time)
         energy.append(e)
     t = np.asarray(times, dtype=np.float64)
@@ -1220,6 +1280,8 @@ def _poses_feature_series(
     if len(idxs) < 2:
         return None
     scale_ref = _scale_for(actor_id)
+    use_3d = _buffer_has_joints3d(poses)
+    scale_ref_3d = track_scale_ref_3d(poses) if use_3d else None
     frames: list[np.ndarray] = []
     masks: list[np.ndarray] = []
     times: list[float] = []
@@ -1227,12 +1289,20 @@ def _poses_feature_series(
     missing = 0
     for ii in idxs:
         i = int(ii)
-        k = poses[i].keypoints
-        packed = (
-            pose_feature_rich_mirrored(k, aspect=_CTX_ASPECT, scale_ref=scale_ref)
-            if mirrored
-            else pose_feature_rich(k, aspect=_CTX_ASPECT, scale_ref=scale_ref)
-        )
+        pose = poses[i]
+        if use_3d and _pose_has_joints3d(pose):
+            packed = (
+                pose_feature_rich_3d_mirrored(pose.joints3d, scale_ref=scale_ref_3d)
+                if mirrored
+                else pose_feature_rich_3d(pose.joints3d, scale_ref=scale_ref_3d)
+            )
+        else:
+            k = pose.keypoints
+            packed = (
+                pose_feature_rich_mirrored(k, aspect=_CTX_ASPECT, scale_ref=scale_ref)
+                if mirrored
+                else pose_feature_rich(k, aspect=_CTX_ASPECT, scale_ref=scale_ref)
+            )
         if packed is None:
             missing += 1
             if feat_dim is None:

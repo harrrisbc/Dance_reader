@@ -4,7 +4,6 @@ import json
 from datetime import datetime, timezone
 from pathlib import Path
 
-import numpy as np
 from pydantic import BaseModel
 
 from app.pipeline.mesh_cache import (
@@ -13,7 +12,7 @@ from app.pipeline.mesh_cache import (
     sha256_file,
 )
 from app.pipeline.metrics import enrich_metrics
-from app.pipeline.pose_track import TrackBuffer, TrackedPose
+from app.pipeline.pose_track import TrackBuffer
 from app.schemas import AnalysisResult
 
 APP_VERSION = "0.1.0"
@@ -103,25 +102,17 @@ def _parse_track_id(actor_id: str) -> int:
 
 
 def buffers_from_analysis(result: AnalysisResult) -> dict[str, TrackBuffer]:
-    """Rebuild TrackBuffers from stored poses so 搵相似 works after Load."""
+    """Rebuild TrackBuffers from stored poses (incl. joints3d) for motifs / Find similar."""
+    from app.pipeline.metrics import _actor_to_buffer
+
     out: dict[str, TrackBuffer] = {}
     for actor in result.actors:
+        if not actor.poses:
+            continue
+        buf = _actor_to_buffer(actor.id, actor.poses)
+        # keep local tid helper consistent for callers that key by track id
         tid = _parse_track_id(actor.id)
-        buf = TrackBuffer(track_id=tid)
-        for pf in actor.poses:
-            kpts = np.asarray(pf.keypoints, dtype=np.float32)
-            if kpts.ndim != 2 or kpts.shape[1] < 3:
-                continue
-            if kpts.shape[1] > 3:
-                kpts = kpts[:, :3]
-            buf.poses.append(
-                TrackedPose(
-                    time=float(pf.time),
-                    track_id=tid,
-                    keypoints=kpts,
-                    xyxy=np.zeros(4, dtype=np.float32),
-                )
-            )
+        buf.track_id = tid
         if buf.poses:
             out[actor.id] = buf
     return out

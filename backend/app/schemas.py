@@ -7,14 +7,19 @@ from pydantic import BaseModel, Field
 
 class MetricPoint(BaseModel):
     time: float
-    energy: float
+    energy: float  # relative to this dancer's peak (0–1)
+    energy_abs: float = 0.0  # smoothed Σ(v/S)² before peak-norm (torso²/s²)
     speed: float
     reach: float = 0.0
     level: float = 0.0
     travel: float = 0.0
     directness: float = 0.0  # 1 = straight path, 0 = winding; NaN when still
-    pos_x: float = 0.0  # COM x in frame, 0 = left, 1 = right (absolute)
-    pos_y: float = 0.0  # foot y in frame, 0 = top/far, 1 = bottom/near (absolute)
+    # coco2d: screen 0–1 (COM x / foot y). smpl3d: pelvis world X / Z in metres.
+    pos_x: float = 0.0
+    pos_y: float = 0.0
+    # Supporting-foot floor: screen 0–1 (coco2d) or world X/Z metres (smpl3d).
+    pos_foot_x: float = 0.0
+    pos_foot_y: float = 0.0
 
 
 class PoseFrame(BaseModel):
@@ -77,6 +82,8 @@ class AnalysisResult(BaseModel):
     smplSidecarSha256: str | None = None
     meshCache: str | None = None
     meshCacheSha256: str | None = None
+    # "smpl3d" when any actor used joints3d metrics; else "coco2d"
+    metricsSpace: str = "coco2d"
 
 
 class JobStatus(BaseModel):

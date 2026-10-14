@@ -30,7 +30,7 @@ Energy 同 Speed 會做 **Savitzky–Golay** 平滑（約 83 ms）；**圖表顯
 | `energy` | Energy | 肢體關節 `(速度 / S)²` 加總，再 ÷ 呢個舞者自己嘅 **最高峰** | 0–1 相對值 |
 | `speed` | Speed | 同樣關節嘅平均 `\|v\| / S` | 軀幹高度 / 秒 |
 | `reach` | Reach | 頭／手腕／腳踝離軀幹中心最遠距離 ÷ `S` | × 軀幹（約 1.2 合／2.5 開） |
-| `level` | Level | 平均 `\|踝_y − 髖_y\|` ÷ 呢條 track 腳長嘅 **90 百分位**，夾喺 0–1 | 站姿比例（*見註*） |
+| `level` | Level | **支撐踝**（較低嗰隻）相對髖中點嘅垂直 drop ÷ 軀幹高 `S` | drop / torso（唔再夾死 0–1） |
 | `travel` | Travel | 約 **0.8 秒** 窗口內腳跡路徑長 ÷ 平均 `S` ÷ 秒數 | 軀幹高度 / 秒 |
 | `directness` | Directness | 窗口內 `淨位移 / 路徑長`；幾乎企定就 **空白（NaN）** | 0 = 彎嚟彎去，1 = 直走 |
 | `pos_x` | L–R | 軀幹 COM 嘅畫面 x | 0 = 左，1 = 右 |
@@ -49,8 +49,8 @@ directness = net / path            如果 path 夠長；唔夠就留空
 
 - 偵測唔穩／冇 pose 嗰陣，會 **沿用上一個好數值**（避免曲線尖峰）。
 - 開舊 `.dance.json` 會用 `enrich_metrics` 由 poses **重計晒**曲線。
-- **Level 而家仍然**係「腳長 ÷ 本片 p90」。之後會改做 `(支撐踝_y − 髖_y) / 軀幹高`（工單 `AGENT_HANDOFF_LEVEL_DEFINITION.md`）。
-- Floor map 用 `pos_x`／`pos_y` — **畫面座標**，唔係舞台米數。
+- **Level** 已改做髖 → 支撐踝 / 軀幹（Phase 2）。
+- Floor map：`coco2d` = 畫面座標；`smpl3d` = 世界 XZ 米（骨盆實線 + 支撐腳虛線；static cam，唔係舞台 GPS）。
 
 ---
 

@@ -1,8 +1,9 @@
 # WORK ORDER — redefine `level` (metric semantics)
 
-**To:** programming agent
-**From:** Design agent
-**Date:** 2026-08-06
+**To:** programming agent  
+**From:** Design agent  
+**Date:** 2026-08-06  
+**Status:** done — shipped with GVHMR Phase 2 ([2026-10-15 design](./superpowers/specs/2026-10-15-gvhmr-3d-metrics-phase2-design.md); notes [IMPLEMENTATION_NOTES_GVHMR_3D_METRICS.md](./IMPLEMENTATION_NOTES_GVHMR_3D_METRICS.md))  
 **Answers:** [PROPOSAL_METRIC_MATH.md](./PROPOSAL_METRIC_MATH.md) item A5 — design decision made below.
 
 ## Why

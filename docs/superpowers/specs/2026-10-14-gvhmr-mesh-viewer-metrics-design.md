@@ -95,42 +95,17 @@ Wire overlay and Phase 2 metrics must **not** block on bake success.
 
 ## Phase 2 — Metrics from `joints3d`
 
-### Goal
+**Authoritative detail (2026-10-15):**  
+[2026-10-15-gvhmr-3d-metrics-phase2-design.md](./2026-10-15-gvhmr-3d-metrics-phase2-design.md)
 
-For tracks that have SMPL-24 `joints3d` in meters (`coordFrame: "gvhmr_world"`):
+Summary locked with the user:
 
-- Remove use of `smpl_keypoints_to_coco17` for metrics and motifs.
-- Recompute energy, speed, reach, travel, level, directness, and motif features from 3D joints.
-- Expose `metricsSpace: "smpl3d"` on the analysis result (vs `"coco2d"` for legacy).
-
-### Measurement principles
-
-| Metric | 3D approach (summary) |
-|--------|------------------------|
-| Speed / energy | 3D joint or limb-segment velocities (m/s); energy from speed² or a documented kinetic proxy |
-| Reach | 3D distance of wrists/ankles from pelvis or torso (meters) |
-| Travel | Pelvis (joint 0) path length on ground XZ |
-| Level | Pelvis / head height on Y (meters) |
-| Directness | 3D path length vs chord |
-| Motifs | 3D limb angles / relative positions; retune DTW gates on real clips |
-
-Do **not** reuse pixel / normalized-image thresholds. Recalibrate on real footage after the feature change (same lesson as W1–W4).
-
-### Legacy coexistence
-
-- 17-point poses, no `joints3d` → keep the existing 2D formulas (`metricsSpace: "coco2d"`).
-- 24-point + `joints3d` → 3D path.
-- Opening an old project must not force Re-analyze for charts to appear.
-
-Mesh bake failure must not block Phase 2 metrics (metrics use joints already in JSON).
-
-### Out of scope for Phase 2
-
-- Live Link, FBX/BVH
-- Changing YOLO box tracking
-- Metrics from mesh vertices (24 joints only)
-- Retraining GVHMR
-
+- Branch in `metrics.py`: 24×`joints3d` → all charts + motifs in world 3D (`metricsSpace: "smpl3d"`); else `coco2d`.
+- Delete COCO-17 bridge on the 24-point path.
+- Floor map (`smpl3d`): pelvis XZ solid + supporting-foot XZ dashed (metres, static-cam world).
+- Redefine `level` on **both** paths (hip → supporting ankle / torso); absorb level handoff.
+- Retune motif gates on 武拜廟 + `hi` before Phase 2 is done.
+- Mesh bake failure must not block metrics.
 ---
 
 ## Phase 3 — Spec only (not implemented here)
