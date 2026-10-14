@@ -7,21 +7,23 @@ from PySide6.QtCore import Qt
 from PySide6.QtWidgets import QLabel, QVBoxLayout, QWidget
 
 _INSTALL_HINT = (
-    "3D viewer requires pyvista and pyvistaqt.\n"
-    "Install: pip install pyvista pyvistaqt"
+    "3D viewer requires pyvista and pyvistaqt in the app venv.\n"
+    "Install:\n"
+    r".\backend\.venv\Scripts\python.exe -m pip install pyvista pyvistaqt"
 )
 
 _PV_AVAILABLE = False
 _pv = None
 _QtInteractor = None
+_PV_IMPORT_ERROR: str | None = None
 
 try:
     import pyvista as _pv
     from pyvistaqt import QtInteractor as _QtInteractor
 
     _PV_AVAILABLE = True
-except ImportError:
-    pass
+except Exception as exc:  # ImportError, VTK binary mismatch, etc.
+    _PV_IMPORT_ERROR = f"{type(exc).__name__}: {exc}"
 
 
 def _faces_for_pyvista(faces: np.ndarray) -> np.ndarray:
@@ -58,7 +60,10 @@ class MeshWorldView(QWidget):
         layout.setContentsMargins(0, 0, 0, 0)
 
         if not _PV_AVAILABLE:
-            hint = QLabel(_INSTALL_HINT, self)
+            text = _INSTALL_HINT
+            if _PV_IMPORT_ERROR:
+                text = f"{_INSTALL_HINT}\n\n({_PV_IMPORT_ERROR})"
+            hint = QLabel(text, self)
             hint.setAlignment(Qt.AlignmentFlag.AlignCenter)
             hint.setWordWrap(True)
             hint.setStyleSheet("color: #aaa; padding: 12px;")
@@ -111,11 +116,17 @@ class MeshWorldView(QWidget):
     def _refresh_mesh(self, *, reset_camera: bool = False) -> None:
         if self._plotter is None or self._verts is None or self._faces is None:
             return
+        if self._faces.size == 0 or self._faces.shape[0] == 0:
+            # Empty faces (old bake without SMPL/SMPLX) — skip to avoid VTK spam.
+            return
         idx = min(self._frame_idx, self._verts.shape[0] - 1)
         pts = self._verts[idx]
-        pv_faces = _faces_for_pyvista(self._faces)
-        mesh = _pv.PolyData(pts, pv_faces)
-        mesh.compute_normals(inplace=True)
+        try:
+            pv_faces = _faces_for_pyvista(self._faces)
+            mesh = _pv.PolyData(pts, pv_faces)
+            mesh.compute_normals(inplace=True)
+        except Exception:
+            return
 
         if self._mesh_actor is not None:
             self._plotter.remove_actor(self._mesh_actor)

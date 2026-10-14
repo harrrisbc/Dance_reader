@@ -458,9 +458,15 @@ class MainWindow(QMainWindow):
         if self._smpl_sidecar_src is not None and self._smpl_sidecar_src.is_file():
             return self._smpl_sidecar_src
         if self._project_path and self.analysis:
-            return resolve_smpl_sidecar_beside_project(
+            found = resolve_smpl_sidecar_beside_project(
                 self._project_path, self.analysis.smplSidecar
             )
+            if found is not None:
+                return found
+            # Fallback: conventional name beside the project JSON.
+            stem_sidecar = self._project_path.parent / f"{self._project_path.stem}.smpl.npz"
+            if stem_sidecar.is_file():
+                return stem_sidecar
         return None
 
     def _resolve_mesh_cache_path(self) -> Path | None:
@@ -481,6 +487,13 @@ class MainWindow(QMainWindow):
 
     def _mesh_cache_is_valid(self, path: Path) -> bool:
         if not path.is_file():
+            return False
+        try:
+            mesh_data = load_mesh_cache(path)
+            faces = np.asarray(mesh_data["faces"])
+            if faces.size == 0 or int(faces.shape[0]) == 0:
+                return False  # old bake without body-model faces — force re-bake
+        except (OSError, ValueError, KeyError):
             return False
         expected = self.analysis.meshCacheSha256 if self.analysis else None
         if not expected:
@@ -688,6 +701,13 @@ class MainWindow(QMainWindow):
         verts_incam = np.asarray(mesh_data[f"verts_incam_{idx}"])
         self._mesh_times = times
 
+        if faces.size == 0 or int(faces.shape[0]) == 0:
+            self._set_mesh_bake_status_error(
+                "Mesh cache has no faces. Delete the .mesh.npz and re-open to re-bake "
+                "(needs SMPLX_NEUTRAL.npz)."
+            )
+            return
+
         if self.mesh_viewer_cb.isChecked():
             self.mesh_view.set_mesh(verts_world, faces)
             self.mesh_view.set_time(self.current_time(), times)
@@ -747,6 +767,17 @@ class MainWindow(QMainWindow):
         self.load_video(Path(path))
 
     def load_video(self, path: Path, *, clear_analysis: bool = True) -> None:
+        path = Path(path)
+        # Re-opening the same video should keep Analyze / mesh (sidecar) state.
+        same_video = (
+            self.video_path is not None
+            and path.resolve() == Path(self.video_path).resolve()
+            and self.analysis is not None
+        )
+        if clear_analysis and same_video:
+            clear_analysis = False
+            self.status.setText(f"Reloaded video (analysis kept): {path.name}")
+
         self.video_path = path
         if clear_analysis:
             self.analysis = None
@@ -783,6 +814,11 @@ class MainWindow(QMainWindow):
             self.status.setText(str(path.name))
         self._set_time_readout(None)
         self.decode.request("open", path)
+        if not clear_analysis and self.analysis is not None:
+            # Re-enable mesh controls after same-video reload / project open.
+            self._sync_mesh_controls()
+            if self._resolve_sidecar_path() is not None:
+                self._ensure_mesh_cache()
 
     def on_decode_opened(self, fps: float, frame_count: int) -> None:
         self.fps = float(fps) or 30.0

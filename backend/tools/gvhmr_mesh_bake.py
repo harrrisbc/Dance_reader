@@ -80,14 +80,29 @@ def write_bake(
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     smplx = make_smplx("supermotion").to(device)
-    smplx2smpl = torch.load("hmr4d/utils/body_model/smplx2smpl_sparse.pt").to(device)
 
-    faces_smpl: np.ndarray | None = None
+    # Prefer SMPL faces + smplx2smpl when SMPL_NEUTRAL.pkl is present.
+    # Otherwise use SMPLX verts/faces from supermotion (user already has SMPLX_NEUTRAL).
+    use_smpl_topo = False
+    smplx2smpl = None
+    faces = np.asarray(smplx.faces, dtype=np.int32)
     try:
         faces_smpl = np.asarray(make_smplx("smpl").faces, dtype=np.int32)
+        if faces_smpl.size > 0:
+            smplx2smpl = torch.load("hmr4d/utils/body_model/smplx2smpl_sparse.pt").to(device)
+            faces = faces_smpl
+            use_smpl_topo = True
     except Exception as exc:
-        print(f"warning: could not load SMPL faces: {exc}", file=sys.stderr)
-        faces_smpl = np.zeros((0, 3), dtype=np.int32)
+        print(
+            f"warning: SMPL faces unavailable ({exc}); using SMPLX mesh topology",
+            file=sys.stderr,
+        )
+
+    if faces.size == 0:
+        raise ValueError(
+            "no mesh faces available: need SMPLX_NEUTRAL.npz or SMPL_NEUTRAL.pkl under "
+            "inputs/checkpoints/body_models/"
+        )
 
     fps = 30.0
     width = height = 0
@@ -112,8 +127,8 @@ def write_bake(
         incam_params = {
             key: torch.as_tensor(sidecar[f"c{i}_{key}"], device=device) for key in SMPL_PARAM_KEYS
         }
-        verts_world = _verts(smplx, smplx2smpl, global_params)
-        verts_incam = _verts(smplx, smplx2smpl, incam_params)
+        verts_world = _verts(smplx, global_params, smplx2smpl if use_smpl_topo else None)
+        verts_incam = _verts(smplx, incam_params, smplx2smpl if use_smpl_topo else None)
         times = (np.arange(n_frames, dtype=np.float64) / fps)
         mask = np.ones(n_frames, dtype=bool)
         cache_tracks.append(
@@ -126,14 +141,14 @@ def write_bake(
         )
 
     overlay_relpath: str | None = None
-    if video is not None and video.is_file() and width > 0 and faces_smpl.size > 0:
+    if video is not None and video.is_file() and width > 0 and faces.size > 0:
         overlay_path, overlay_relpath = resolve_overlay_output(mesh_out, overlay_cli)
         try:
             _render_incam_overlay(
                 video=video,
                 verts_incam=cache_tracks[0]["verts_incam"],
                 k_fullimg=np.asarray(sidecar["K_0"], dtype=np.float32),
-                faces=faces_smpl,
+                faces=faces,
                 overlay_path=overlay_path,
                 fps=fps,
             )
@@ -143,19 +158,22 @@ def write_bake(
 
     save_mesh_cache(
         mesh_out,
-        faces=faces_smpl,
+        faces=faces,
         tracks=cache_tracks,
         overlay_relpath=overlay_relpath,
     )
 
 
-def _verts(smplx, smplx2smpl, params: dict):
+def _verts(smplx, params: dict, smplx2smpl=None):
     import numpy as np
     import torch
     from hmr4d.utils.net_utils import to_cuda
 
     smplx_out = smplx(**to_cuda(params))
-    verts = torch.stack([torch.matmul(smplx2smpl, vertex) for vertex in smplx_out.vertices])
+    if smplx2smpl is None:
+        verts = smplx_out.vertices
+    else:
+        verts = torch.stack([torch.matmul(smplx2smpl, vertex) for vertex in smplx_out.vertices])
     return verts.detach().cpu().numpy().astype(np.float32)
 
 
