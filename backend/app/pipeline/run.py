@@ -90,7 +90,14 @@ def analyze_video(
             progress_cb(p, msg)
 
     progress(0.1, "Running GVHMR…")
-    tracks, ignored = run_gvhmr_export(video_path, max_people=min(max_people, 2))
+    work_dir: Path | None = None
+    if artifacts_dir is not None and job_id is not None:
+        work_dir = artifacts_dir / job_id
+    tracks, ignored, sidecar_path, sidecar_sha = run_gvhmr_export(
+        video_path,
+        max_people=min(max_people, 2),
+        work_dir=work_dir,
+    )
 
     cap = cv2.VideoCapture(str(video_path))
     try:
@@ -110,6 +117,10 @@ def analyze_video(
     motif_types = detect_motif_types(keyed, aspect=aspect)
     motif_diag = LAST_DETECT_STATS.detail()
 
+    smpl_sidecar_rel: str | None = None
+    if sidecar_path is not None and sidecar_path.is_file():
+        smpl_sidecar_rel = sidecar_path.name
+
     result = AnalysisResult(
         version=1,  # MetricPoint may gain fields; defaults keep old JSON loadable
         duration=float(duration),
@@ -124,6 +135,8 @@ def analyze_video(
         coordFrame="gvhmr_world",
         staticCamera=True,
         ignoredTracks=int(ignored),
+        smplSidecar=smpl_sidecar_rel,
+        smplSidecarSha256=sidecar_sha,
     )
     enrich_metrics(result)
 

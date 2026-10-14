@@ -277,8 +277,8 @@ class TestAnalyzeUsesGvhmr(unittest.TestCase):
         ]
         messages: list[str] = []
 
-        def fake_export(video, *, max_people=2):
-            return [poses, poses], 3
+        def fake_export(video, *, max_people=2, work_dir=None):
+            return [poses, poses], 3, None, None
 
         with mock.patch("cv2.VideoCapture", return_value=_Cap()):
             with mock.patch("app.pipeline.run.run_gvhmr_export", fake_export):

@@ -7,6 +7,7 @@ from pathlib import Path
 import numpy as np
 from pydantic import BaseModel
 
+from app.pipeline.mesh_cache import persist_sidecar_with_project, sha256_file
 from app.pipeline.metrics import enrich_metrics
 from app.pipeline.pose_track import TrackBuffer, TrackedPose
 from app.schemas import AnalysisResult
@@ -26,13 +27,24 @@ class DanceProject(BaseModel):
     app_version: str = APP_VERSION
 
 
-def save_project(path: Path, project: DanceProject) -> None:
+def save_project(
+    path: Path,
+    project: DanceProject,
+    *,
+    smpl_sidecar_src: Path | None = None,
+) -> None:
     if not project.saved_at:
         project.saved_at = datetime.now(timezone.utc).isoformat()
     path = Path(path)
     if path.suffix.lower() != ".json" and not str(path).endswith(".dance.json"):
         path = path.with_suffix(".dance.json")
     path.parent.mkdir(parents=True, exist_ok=True)
+    if smpl_sidecar_src is not None and Path(smpl_sidecar_src).is_file():
+        sha = project.analysis.smplSidecarSha256 or sha256_file(smpl_sidecar_src)
+        rel = persist_sidecar_with_project(path, smpl_sidecar_src, sha)
+        dest = path.parent / rel
+        project.analysis.smplSidecar = rel
+        project.analysis.smplSidecarSha256 = sha256_file(dest)
     path.write_text(
         json.dumps(project.model_dump(), ensure_ascii=False, indent=2),
         encoding="utf-8",

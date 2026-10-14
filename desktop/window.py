@@ -99,7 +99,7 @@ _configure_matplotlib()
 
 class AnalyzeWorker(QThread):
     progress = Signal(float, str)
-    finished_ok = Signal(object, object)  # AnalysisResult, keyed buffers
+    finished_ok = Signal(object, object, object)  # AnalysisResult, keyed buffers, sidecar src
     finished_err = Signal(str)
 
     def __init__(
@@ -133,7 +133,12 @@ class AnalyzeWorker(QThread):
                 progress_cb=cb,
             )
             keyed = {f"track_{tid}": buf for tid, buf in buffers.items()}
-            self.finished_ok.emit(result, keyed)
+            sidecar_src = None
+            if result.smplSidecar:
+                candidate = ARTIFACTS / job_id / result.smplSidecar
+                if candidate.is_file():
+                    sidecar_src = candidate
+            self.finished_ok.emit(result, keyed, sidecar_src)
         except Exception as exc:
             self.finished_err.emit(str(exc))
 
@@ -152,6 +157,7 @@ class MainWindow(QMainWindow):
         self.analysis: AnalysisResult | None = None
         self.track_buffers: dict[str, TrackBuffer] = {}
         self.worker: AnalyzeWorker | None = None
+        self._smpl_sidecar_src: Path | None = None
         self.selected_type_id: str | None = None
         self.selected_occ_id: str | None = None
         self._sim_counter = 0
@@ -551,10 +557,11 @@ class MainWindow(QMainWindow):
     def on_progress(self, p: float, msg: str) -> None:
         self.status.setText(f"{msg}  {int(p * 100)}%")
 
-    def on_analyze_done(self, result: object, keyed: object) -> None:
+    def on_analyze_done(self, result: object, keyed: object, sidecar_src: object = None) -> None:
         assert isinstance(result, AnalysisResult)
         self.analysis = result
         self.track_buffers = keyed if isinstance(keyed, dict) else {}
+        self._smpl_sidecar_src = sidecar_src if isinstance(sidecar_src, Path) else None
         self._dirty = True
         self._project_path = None
         self.apply_analysis_to_ui(seek_first_motif=True)
@@ -653,7 +660,13 @@ class MainWindow(QMainWindow):
                 max_people=int(self.max_people_spin.value()),
                 pose_model=self.selected_pose_model(),
             )
-            save_project(out, project)
+            save_project(out, project, smpl_sidecar_src=self._smpl_sidecar_src)
+            self.analysis = project.analysis
+            if project.analysis.smplSidecar:
+                beside = out.parent / project.analysis.smplSidecar
+                self._smpl_sidecar_src = beside if beside.is_file() else None
+            else:
+                self._smpl_sidecar_src = None
             self._project_path = out
             self._dirty = False
             self.status.setText(f"Saved: {out.name}")

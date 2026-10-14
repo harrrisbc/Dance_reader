@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import shutil
 from pathlib import Path
 from typing import Any
 
@@ -22,6 +23,24 @@ def _require_keys(keys: set[str], required: list[str], context: str) -> None:
 
 def _archive_to_dict(archive: np.lib.npyio.NpzFile) -> dict[str, Any]:
     return {k: np.asarray(archive[k]) for k in archive.files}
+
+
+def persist_sidecar_with_project(
+    dance_json_path: Path,
+    src_sidecar: Path,
+    sha256_hex: str | None = None,
+) -> str:
+    """Copy SMPL sidecar beside the project JSON; return relative filename."""
+    dance_json_path = Path(dance_json_path)
+    src_sidecar = Path(src_sidecar)
+    rel_name = f"{dance_json_path.stem}.smpl.npz"
+    dest = dance_json_path.parent / rel_name
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(src_sidecar, dest)
+    if sha256_hex is not None:
+        if sha256_file(dest) != sha256_hex:
+            raise ValueError("sidecar copy sha256 mismatch")
+    return rel_name
 
 
 def sha256_file(path: Path) -> str:

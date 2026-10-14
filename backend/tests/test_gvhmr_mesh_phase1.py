@@ -97,3 +97,18 @@ class TestSaveSmplSidecar(unittest.TestCase):
                 save_smpl_sidecar(p, tracks)
             self.assertIn("K has T=3", str(ctx.exception))
             self.assertIn("expected T=2", str(ctx.exception))
+
+
+class TestPersistSidecar(unittest.TestCase):
+    def test_copy_sidecar_next_to_dance_json(self) -> None:
+        from app.pipeline.mesh_cache import persist_sidecar_with_project
+
+        with tempfile.TemporaryDirectory() as tmp:
+            src = Path(tmp) / "work" / "gvhmr.dance.smpl.npz"
+            src.parent.mkdir()
+            np.savez_compressed(src, n_tracks=np.int32(0))
+            dance = Path(tmp) / "proj.dance.json"
+            dance.write_text("{}", encoding="utf-8")
+            rel = persist_sidecar_with_project(dance, src, sha256_file(src))
+            self.assertEqual(rel, "proj.dance.smpl.npz")
+            self.assertTrue((dance.parent / rel).is_file())
