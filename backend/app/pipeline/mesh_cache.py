@@ -25,6 +25,28 @@ def _archive_to_dict(archive: np.lib.npyio.NpzFile) -> dict[str, Any]:
     return {k: np.asarray(archive[k]) for k in archive.files}
 
 
+def mesh_cache_rel_name(dance_json_path: Path) -> str:
+    return f"{Path(dance_json_path).stem}.dance.mesh.npz"
+
+
+def persist_mesh_cache_with_project(
+    dance_json_path: Path,
+    src_mesh: Path,
+    sha256_hex: str | None = None,
+) -> str:
+    """Copy baked mesh cache beside the project JSON; return relative filename."""
+    dance_json_path = Path(dance_json_path)
+    src_mesh = Path(src_mesh)
+    rel_name = mesh_cache_rel_name(dance_json_path)
+    dest = dance_json_path.parent / rel_name
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(src_mesh, dest)
+    if sha256_hex is not None:
+        if sha256_file(dest) != sha256_hex:
+            raise ValueError("mesh cache copy sha256 mismatch")
+    return rel_name
+
+
 def persist_sidecar_with_project(
     dance_json_path: Path,
     src_sidecar: Path,

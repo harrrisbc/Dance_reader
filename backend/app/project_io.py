@@ -7,7 +7,11 @@ from pathlib import Path
 import numpy as np
 from pydantic import BaseModel
 
-from app.pipeline.mesh_cache import persist_sidecar_with_project, sha256_file
+from app.pipeline.mesh_cache import (
+    persist_mesh_cache_with_project,
+    persist_sidecar_with_project,
+    sha256_file,
+)
 from app.pipeline.metrics import enrich_metrics
 from app.pipeline.pose_track import TrackBuffer, TrackedPose
 from app.schemas import AnalysisResult
@@ -38,11 +42,23 @@ def resolve_smpl_sidecar_beside_project(
     return beside if beside.is_file() else None
 
 
+def resolve_mesh_cache_beside_project(
+    project_json: Path,
+    mesh_cache_rel: str | None,
+) -> Path | None:
+    """Return absolute path to mesh cache next to the project JSON if it exists."""
+    if not mesh_cache_rel:
+        return None
+    beside = Path(project_json).parent / mesh_cache_rel
+    return beside if beside.is_file() else None
+
+
 def save_project(
     path: Path,
     project: DanceProject,
     *,
     smpl_sidecar_src: Path | None = None,
+    mesh_cache_src: Path | None = None,
 ) -> None:
     if not project.saved_at:
         project.saved_at = datetime.now(timezone.utc).isoformat()
@@ -56,6 +72,12 @@ def save_project(
         dest = path.parent / rel
         project.analysis.smplSidecar = rel
         project.analysis.smplSidecarSha256 = sha256_file(dest)
+    if mesh_cache_src is not None and Path(mesh_cache_src).is_file():
+        sha = project.analysis.meshCacheSha256 or sha256_file(mesh_cache_src)
+        rel = persist_mesh_cache_with_project(path, mesh_cache_src, sha)
+        dest = path.parent / rel
+        project.analysis.meshCache = rel
+        project.analysis.meshCacheSha256 = sha256_file(dest)
     path.write_text(
         json.dumps(project.model_dump(), ensure_ascii=False, indent=2),
         encoding="utf-8",

@@ -25,6 +25,7 @@ from PySide6.QtWidgets import (
     QPushButton,
     QSlider,
     QSpinBox,
+    QSplitter,
     QVBoxLayout,
     QWidget,
 )
@@ -46,14 +47,22 @@ from app.pipeline.pose_track import (
     resolve_pose_model,
 )
 from app.pipeline.run import analyze_video
+from app.pipeline.mesh_cache import (
+    load_mesh_cache,
+    load_smpl_sidecar,
+    persist_mesh_cache_with_project,
+    sha256_file,
+)
 from app.project_io import (
     DanceProject,
     buffers_from_analysis,
     load_project,
+    resolve_mesh_cache_beside_project,
     resolve_smpl_sidecar_beside_project,
     save_project,
 )
 from app.schemas import AnalysisResult, Actor, MotifOccurrence, MotifType
+from desktop.mesh_view import MeshWorldView
 from desktop.playback import OverlayPose, VideoDecodeWorker
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -62,6 +71,7 @@ ARTIFACTS = BACKEND / "artifacts"
 ZOOM_MIN_WINDOW_S = 2.0
 PLAYHEAD_MIN_INTERVAL_S = 0.1  # ~10 Hz chart/floor updates while playing
 TIME_READOUT_EMPTY = "--:--.-- / --:--.--"
+MESH_DISABLED_TIP = "Re-analyze to enable mesh"
 
 
 def format_timecode(seconds: float) -> str:
@@ -144,6 +154,38 @@ class AnalyzeWorker(QThread):
             self.finished_err.emit(str(exc))
 
 
+class MeshBakeWorker(QThread):
+    finished_ok = Signal(object)
+    finished_err = Signal(str)
+
+    def __init__(
+        self,
+        *,
+        sidecar: Path,
+        mesh_out: Path,
+        video: Path | None,
+    ) -> None:
+        super().__init__()
+        self._sidecar = sidecar
+        self._mesh_out = mesh_out
+        self._video = video
+
+    def run(self) -> None:
+        from app.pipeline.gvhmr_run import MeshBakeError, run_mesh_bake
+
+        try:
+            run_mesh_bake(
+                smpl_sidecar=self._sidecar,
+                mesh_out=self._mesh_out,
+                video=self._video,
+            )
+            self.finished_ok.emit(self._mesh_out)
+        except MeshBakeError as exc:
+            self.finished_err.emit(str(exc))
+        except Exception as exc:
+            self.finished_err.emit(str(exc))
+
+
 class MainWindow(QMainWindow):
     def __init__(self) -> None:
         super().__init__()
@@ -159,6 +201,9 @@ class MainWindow(QMainWindow):
         self.track_buffers: dict[str, TrackBuffer] = {}
         self.worker: AnalyzeWorker | None = None
         self._smpl_sidecar_src: Path | None = None
+        self._mesh_bake_worker: MeshBakeWorker | None = None
+        self._mesh_times: np.ndarray | None = None
+        self._status_before_bake = ""
         self.selected_type_id: str | None = None
         self.selected_occ_id: str | None = None
         self._sim_counter = 0
@@ -278,6 +323,16 @@ class MainWindow(QMainWindow):
         )
         self.mesh_overlay_cb.stateChanged.connect(self._on_mesh_overlay_toggle)
 
+        self.mesh_viewer_cb = QCheckBox("3D viewer")
+        self.mesh_viewer_cb.setToolTip(
+            "Show orbitable world-space mesh beside the video."
+        )
+        self.mesh_viewer_cb.stateChanged.connect(self._on_mesh_viewer_toggle)
+
+        self.mesh_view = MeshWorldView()
+        self.mesh_view.setMinimumWidth(280)
+        self.mesh_view.hide()
+
         self.floor_toggle = QCheckBox("Floor map (screen coords)")
         self.floor_toggle.setChecked(True)
         self.floor_toggle.setToolTip(
@@ -319,6 +374,7 @@ class MainWindow(QMainWindow):
         top.addWidget(QLabel("Overlay"))
         top.addWidget(self.skel_style)
         top.addWidget(self.mesh_overlay_cb)
+        top.addWidget(self.mesh_viewer_cb)
         top.addWidget(QLabel("Max dancers"))
         top.addWidget(self.max_people_spin)
         top.addWidget(self.model_label)
@@ -361,14 +417,24 @@ class MainWindow(QMainWindow):
         right.addWidget(self.floor_toggle)
         right.addWidget(self.floor_canvas, stretch=2)
 
-        body = QHBoxLayout()
-        left = QVBoxLayout()
-        left.addWidget(self.video_label, stretch=1)
+        video_col = QVBoxLayout()
+        video_col.addWidget(self.video_label, stretch=1)
         transport = QHBoxLayout()
         transport.addWidget(self.time_label)
         transport.addWidget(self.slider, stretch=1)
-        left.addLayout(transport)
-        body.addLayout(left, stretch=3)
+        video_col.addLayout(transport)
+        video_host = QWidget()
+        video_host.setLayout(video_col)
+
+        self._video_splitter = QSplitter(Qt.Orientation.Horizontal)
+        self._video_splitter.addWidget(video_host)
+        self._video_splitter.addWidget(self.mesh_view)
+        self._video_splitter.setStretchFactor(0, 3)
+        self._video_splitter.setStretchFactor(1, 2)
+        self._video_splitter.setCollapsible(1, True)
+
+        body = QHBoxLayout()
+        body.addWidget(self._video_splitter, stretch=3)
         body.addLayout(right, stretch=2)
 
         root = QVBoxLayout()
@@ -381,6 +447,232 @@ class MainWindow(QMainWindow):
         self.setCentralWidget(w)
 
         self.actor_combo.currentIndexChanged.connect(self.sync_overlay)
+        self.actor_combo.currentIndexChanged.connect(self._refresh_mesh_track_layer)
+        self._sync_mesh_controls()
+
+    @staticmethod
+    def _sidecar_to_mesh_out(sidecar: Path) -> Path:
+        name = sidecar.name
+        if name.endswith(".dance.smpl.npz"):
+            return sidecar.with_name(name.replace(".dance.smpl.npz", ".dance.mesh.npz"))
+        return sidecar.with_name(f"{sidecar.stem}.dance.mesh.npz")
+
+    def _resolve_sidecar_path(self) -> Path | None:
+        if self._smpl_sidecar_src is not None and self._smpl_sidecar_src.is_file():
+            return self._smpl_sidecar_src
+        if self._project_path and self.analysis:
+            return resolve_smpl_sidecar_beside_project(
+                self._project_path, self.analysis.smplSidecar
+            )
+        return None
+
+    def _resolve_mesh_cache_path(self) -> Path | None:
+        if not self.analysis or not self.analysis.meshCache:
+            return None
+        if self._project_path:
+            beside = resolve_mesh_cache_beside_project(
+                self._project_path, self.analysis.meshCache
+            )
+            if beside is not None:
+                return beside
+        sidecar = self._resolve_sidecar_path()
+        if sidecar is not None:
+            sibling = self._sidecar_to_mesh_out(sidecar)
+            if sibling.is_file():
+                return sibling
+        return None
+
+    def _mesh_cache_is_valid(self, path: Path) -> bool:
+        if not path.is_file():
+            return False
+        expected = self.analysis.meshCacheSha256 if self.analysis else None
+        if not expected:
+            return True
+        try:
+            return sha256_file(path) == expected
+        except OSError:
+            return False
+
+    def _mesh_track_index(self) -> int:
+        actor = self.selected_actor()
+        if actor is None:
+            return 0
+        if actor.id.startswith("track_"):
+            try:
+                return int(actor.id.split("_", 1)[1])
+            except ValueError:
+                pass
+        return 0
+
+    def _mesh_bake_out_path(self, sidecar: Path) -> Path:
+        if self._project_path is not None:
+            from app.pipeline.mesh_cache import mesh_cache_rel_name
+
+            return self._project_path.parent / mesh_cache_rel_name(self._project_path)
+        return self._sidecar_to_mesh_out(sidecar)
+
+    def _sync_mesh_controls(self) -> None:
+        has_sidecar = self._resolve_sidecar_path() is not None
+        tip = (
+            "Soft-rendered mesh video or projected mesh edges on playback."
+            if has_sidecar
+            else MESH_DISABLED_TIP
+        )
+        self.mesh_overlay_cb.setToolTip(tip)
+        self.mesh_viewer_cb.setToolTip(
+            "Show orbitable world-space mesh beside the video."
+            if has_sidecar
+            else MESH_DISABLED_TIP
+        )
+        self.mesh_overlay_cb.setEnabled(has_sidecar)
+        self.mesh_viewer_cb.setEnabled(has_sidecar)
+        if not has_sidecar:
+            self.mesh_overlay_cb.blockSignals(True)
+            self.mesh_overlay_cb.setChecked(False)
+            self.mesh_overlay_cb.blockSignals(False)
+            self.mesh_viewer_cb.blockSignals(True)
+            self.mesh_viewer_cb.setChecked(False)
+            self.mesh_viewer_cb.blockSignals(False)
+            self.mesh_view.hide()
+            self._mesh_times = None
+            self.mesh_view.clear()
+            self.decode.request("set_mesh_overlay", False)
+            self.decode.request("set_mesh_layer", None)
+
+    def _ensure_mesh_cache(self) -> None:
+        sidecar = self._resolve_sidecar_path()
+        if sidecar is None or self.analysis is None:
+            self._sync_mesh_controls()
+            return
+        self._sync_mesh_controls()
+        existing = self._resolve_mesh_cache_path()
+        if existing is not None and self._mesh_cache_is_valid(existing):
+            self._apply_mesh_from_path(existing)
+            return
+        if self._mesh_bake_worker is not None and self._mesh_bake_worker.isRunning():
+            return
+        mesh_out = self._mesh_bake_out_path(sidecar)
+        self._status_before_bake = self.status.text()
+        self.status.setText("Building mesh cache…")
+        worker = MeshBakeWorker(
+            sidecar=sidecar,
+            mesh_out=mesh_out,
+            video=self.video_path,
+        )
+        worker.finished_ok.connect(self._on_mesh_bake_ok)
+        worker.finished_err.connect(self._on_mesh_bake_err)
+        self._mesh_bake_worker = worker
+        worker.start()
+
+    def _on_mesh_bake_ok(self, mesh_path: object) -> None:
+        if not isinstance(mesh_path, Path) or self.analysis is None:
+            return
+        try:
+            digest = sha256_file(mesh_path)
+        except OSError as exc:
+            self._on_mesh_bake_err(str(exc))
+            return
+        rel = mesh_path.name
+        resolved = mesh_path
+        if self._project_path is not None:
+            rel = persist_mesh_cache_with_project(self._project_path, mesh_path, digest)
+            resolved = self._project_path.parent / rel
+            self._persist_analysis_json()
+        self.analysis.meshCache = rel
+        self.analysis.meshCacheSha256 = digest
+        self._dirty = True
+        self._apply_mesh_from_path(resolved)
+        prior = getattr(self, "_status_before_bake", "") or ""
+        self.status.setText(prior if prior else "Mesh cache ready")
+
+    def _on_mesh_bake_err(self, msg: str) -> None:
+        text = msg.strip()
+        if text:
+            line = text.splitlines()[-1].strip()
+        else:
+            line = "Mesh bake failed"
+        if len(line) > 220:
+            line = line[:217] + "..."
+        self.status.setText(f"Mesh bake: {line}")
+
+    def _persist_analysis_json(self) -> None:
+        if self._project_path is None or self.analysis is None or self.video_path is None:
+            return
+        project = DanceProject(
+            video_path=str(self.video_path.resolve()),
+            analysis=self.analysis,
+            max_people=int(self.max_people_spin.value()),
+            pose_model=self.selected_pose_model(),
+        )
+        save_project(self._project_path, project)
+
+    def _apply_mesh_from_path(self, mesh_path: Path) -> None:
+        sidecar = self._resolve_sidecar_path()
+        if sidecar is None or not mesh_path.is_file():
+            return
+        try:
+            mesh_data = load_mesh_cache(mesh_path)
+            smpl = load_smpl_sidecar(sidecar)
+        except (OSError, ValueError) as exc:
+            self._on_mesh_bake_err(str(exc))
+            return
+
+        idx = self._mesh_track_index()
+        n_tracks = int(mesh_data.get("n_tracks", 1))
+        idx = max(0, min(idx, max(0, n_tracks - 1)))
+
+        faces = np.asarray(mesh_data["faces"])
+        times = np.asarray(mesh_data[f"times_{idx}"], dtype=np.float64)
+        verts_world = np.asarray(mesh_data[f"verts_world_{idx}"])
+        verts_incam = np.asarray(mesh_data[f"verts_incam_{idx}"])
+        self._mesh_times = times
+
+        if self.mesh_viewer_cb.isChecked():
+            self.mesh_view.set_mesh(verts_world, faces)
+            self.mesh_view.set_time(self.current_time(), times)
+
+        overlay_path: Path | None = None
+        if "overlay_relpath" in mesh_data:
+            rel = str(np.asarray(mesh_data["overlay_relpath"]).ravel()[0])
+            candidate = mesh_path.parent / rel
+            if candidate.is_file():
+                overlay_path = candidate
+
+        if overlay_path is not None:
+            self.decode.request("set_mesh_layer", overlay_path)
+        else:
+            fw = int(self.analysis.frame_width or 0) if self.analysis else 0
+            fh = int(self.analysis.frame_height or 0) if self.analysis else 0
+            k_arr = np.asarray(smpl[f"K_{idx}"], dtype=np.float32)
+            payload = {
+                "times": times,
+                "verts_incam": verts_incam,
+                "faces": faces,
+                "K": k_arr,
+                "width": fw,
+                "height": fh,
+            }
+            self.decode.request("set_mesh_layer", payload)
+
+        if self.mesh_overlay_cb.isChecked():
+            self.decode.request("set_mesh_overlay", True)
+
+    def _refresh_mesh_track_layer(self) -> None:
+        path = self._resolve_mesh_cache_path()
+        if path is not None and self._mesh_cache_is_valid(path):
+            self._apply_mesh_from_path(path)
+
+    def _on_mesh_viewer_toggle(self) -> None:
+        show = self.mesh_viewer_cb.isChecked()
+        self.mesh_view.setVisible(show)
+        if show:
+            path = self._resolve_mesh_cache_path()
+            if path is not None and self._mesh_cache_is_valid(path):
+                self._apply_mesh_from_path(path)
+            elif self._resolve_sidecar_path() is not None:
+                self._ensure_mesh_cache()
+        else:
+            self.mesh_view.clear()
 
     def open_video(self) -> None:
         path, _ = QFileDialog.getOpenFileName(
@@ -414,6 +706,12 @@ class MainWindow(QMainWindow):
             self.canvas.draw_idle()
             self.floor_canvas.draw_idle()
             self.sync_overlay()
+            self._smpl_sidecar_src = None
+            self._mesh_times = None
+            self.mesh_view.clear()
+            self.decode.request("set_mesh_layer", None)
+            self.decode.request("set_mesh_overlay", False)
+            self._sync_mesh_controls()
         self._display_frame = 0
         self._video_ready = False
         self.playing = False
@@ -589,6 +887,7 @@ class MainWindow(QMainWindow):
             status += f" · ignored {result.ignoredTracks} extra tracks"
         self.status.setText(status)
         self.sync_overlay()
+        self._ensure_mesh_cache()
         self.decode.request("seek", int(self.slider.value()))
 
     def selected_actor(self) -> Actor | None:
@@ -668,7 +967,13 @@ class MainWindow(QMainWindow):
                 max_people=int(self.max_people_spin.value()),
                 pose_model=self.selected_pose_model(),
             )
-            save_project(out, project, smpl_sidecar_src=self._smpl_sidecar_src)
+            mesh_src = self._resolve_mesh_cache_path()
+            save_project(
+                out,
+                project,
+                smpl_sidecar_src=self._smpl_sidecar_src,
+                mesh_cache_src=mesh_src,
+            )
             self.analysis = project.analysis
             self._smpl_sidecar_src = resolve_smpl_sidecar_beside_project(
                 out, project.analysis.smplSidecar
@@ -728,6 +1033,7 @@ class MainWindow(QMainWindow):
         self.load_video(video, clear_analysis=False)
         self.apply_analysis_to_ui(seek_first_motif=False)
         self.sync_overlay()
+        self._ensure_mesh_cache()
         self.status.setText(
             f"Loaded project: {Path(path).name} ({len(project.analysis.actors)} dancers, "
             f"{len(project.analysis.motifTypes)} types) — no re-analysis needed"
@@ -1098,6 +1404,13 @@ class MainWindow(QMainWindow):
     def update_playhead(self, t: float, *, force: bool = False) -> None:
         # Cheap; update every call so the clock stays accurate even when chart/floor throttle
         self._set_time_readout(float(t) if self._video_ready else None)
+
+        if (
+            self.mesh_viewer_cb.isChecked()
+            and self._mesh_times is not None
+            and self._mesh_times.size > 0
+        ):
+            self.mesh_view.set_time(float(t), self._mesh_times)
 
         if self.playing and not force:
             now = time.perf_counter()
