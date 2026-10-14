@@ -99,6 +99,30 @@ class TestSaveSmplSidecar(unittest.TestCase):
             self.assertIn("expected T=2", str(ctx.exception))
 
 
+class TestResolveSidecarBesideProject(unittest.TestCase):
+    def test_missing_rel_or_file_returns_none(self) -> None:
+        from app.project_io import resolve_smpl_sidecar_beside_project
+
+        with tempfile.TemporaryDirectory() as tmp:
+            dance = Path(tmp) / "proj.dance.json"
+            dance.write_text("{}", encoding="utf-8")
+            self.assertIsNone(resolve_smpl_sidecar_beside_project(dance, None))
+            self.assertIsNone(
+                resolve_smpl_sidecar_beside_project(dance, "missing.dance.smpl.npz")
+            )
+
+    def test_returns_path_when_sidecar_beside_json(self) -> None:
+        from app.project_io import resolve_smpl_sidecar_beside_project
+
+        with tempfile.TemporaryDirectory() as tmp:
+            dance = Path(tmp) / "proj.dance.json"
+            dance.write_text("{}", encoding="utf-8")
+            sidecar = Path(tmp) / "proj.dance.smpl.npz"
+            np.savez_compressed(sidecar, n_tracks=np.int32(0))
+            got = resolve_smpl_sidecar_beside_project(dance, sidecar.name)
+            self.assertEqual(got, sidecar)
+
+
 class TestPersistSidecar(unittest.TestCase):
     def test_copy_sidecar_next_to_dance_json(self) -> None:
         from app.pipeline.mesh_cache import persist_sidecar_with_project

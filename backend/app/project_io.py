@@ -27,6 +27,17 @@ class DanceProject(BaseModel):
     app_version: str = APP_VERSION
 
 
+def resolve_smpl_sidecar_beside_project(
+    project_json: Path,
+    smpl_sidecar_rel: str | None,
+) -> Path | None:
+    """Return absolute path to sidecar next to the project JSON if it exists."""
+    if not smpl_sidecar_rel:
+        return None
+    beside = Path(project_json).parent / smpl_sidecar_rel
+    return beside if beside.is_file() else None
+
+
 def save_project(
     path: Path,
     project: DanceProject,

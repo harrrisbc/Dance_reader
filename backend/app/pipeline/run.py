@@ -117,6 +117,7 @@ def analyze_video(
     motif_types = detect_motif_types(keyed, aspect=aspect)
     motif_diag = LAST_DETECT_STATS.detail()
 
+    # Without artifacts_dir/job_id, sidecar lives in mkstemp until save_project copies it.
     smpl_sidecar_rel: str | None = None
     if sidecar_path is not None and sidecar_path.is_file():
         smpl_sidecar_rel = sidecar_path.name

@@ -50,6 +50,7 @@ from app.project_io import (
     DanceProject,
     buffers_from_analysis,
     load_project,
+    resolve_smpl_sidecar_beside_project,
     save_project,
 )
 from app.schemas import AnalysisResult, Actor, MotifOccurrence, MotifType
@@ -662,11 +663,9 @@ class MainWindow(QMainWindow):
             )
             save_project(out, project, smpl_sidecar_src=self._smpl_sidecar_src)
             self.analysis = project.analysis
-            if project.analysis.smplSidecar:
-                beside = out.parent / project.analysis.smplSidecar
-                self._smpl_sidecar_src = beside if beside.is_file() else None
-            else:
-                self._smpl_sidecar_src = None
+            self._smpl_sidecar_src = resolve_smpl_sidecar_beside_project(
+                out, project.analysis.smplSidecar
+            )
             self._project_path = out
             self._dirty = False
             self.status.setText(f"Saved: {out.name}")
@@ -711,9 +710,13 @@ class MainWindow(QMainWindow):
         if project.pose_model:
             self._last_pose_model = resolve_pose_model(project.pose_model)
 
+        project_json = Path(path)
         self.analysis = project.analysis
         self.track_buffers = buffers_from_analysis(project.analysis)
-        self._project_path = Path(path)
+        self._project_path = project_json
+        self._smpl_sidecar_src = resolve_smpl_sidecar_beside_project(
+            project_json, project.analysis.smplSidecar
+        )
         self._dirty = False
         self.load_video(video, clear_analysis=False)
         self.apply_analysis_to_ui(seek_first_motif=False)
