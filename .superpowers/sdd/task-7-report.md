@@ -20,7 +20,7 @@ Manual: after `pip install pyvista pyvistaqt`, instantiate widget in desktop wit
 
 ## Commits
 
-- (pending hash) — Add PyVista world mesh viewer widget for desktop.
+- `a956a75671faa09a1d8fb0c8987b0efb3a209645` — Add PyVista world mesh viewer widget for desktop.
 
 Author/committer: `H.arimadion <harrrisbc@users.noreply.github.com>`. Not pushed.
 
