@@ -7,6 +7,7 @@ import numpy as np
 from app.pipeline.mesh_cache import (
     load_mesh_cache,
     load_smpl_sidecar,
+    save_mesh_cache,
     save_smpl_sidecar,
     sha256_file,
 )
@@ -45,6 +46,41 @@ class TestMeshCacheSchema(unittest.TestCase):
             np.savez_compressed(p, n_tracks=np.int32(0))
             with self.assertRaises(ValueError):
                 load_mesh_cache(p)
+
+
+class TestOverlayPaths(unittest.TestCase):
+    def test_default_overlay_beside_mesh(self) -> None:
+        import sys
+
+        tools_dir = Path(__file__).resolve().parents[1] / "tools"
+        sys.path.insert(0, str(tools_dir))
+        from gvhmr_mesh_bake import resolve_overlay_output
+
+        mesh = Path("C:/proj/clip.dance.mesh.npz")
+        path, rel = resolve_overlay_output(mesh, None)
+        self.assertEqual(path.name, "clip.dance.mesh.overlay.mp4")
+        self.assertEqual(rel, "clip.dance.mesh.overlay.mp4")
+
+
+class TestSaveMeshCache(unittest.TestCase):
+    def test_roundtrip_faces(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            p = Path(tmp) / "m.dance.mesh.npz"
+            faces = np.array([[0, 1, 2]], np.int32)
+            save_mesh_cache(
+                p,
+                faces=faces,
+                tracks=[
+                    {
+                        "verts_world": np.zeros((2, 3, 3), np.float32),
+                        "verts_incam": np.zeros((2, 3, 3), np.float32),
+                        "times": np.array([0.0, 0.1], np.float64),
+                        "mask": np.array([True, True]),
+                    }
+                ],
+            )
+            d = load_mesh_cache(p)
+            np.testing.assert_array_equal(d["faces"], faces)
 
 
 class TestSaveSmplSidecar(unittest.TestCase):
